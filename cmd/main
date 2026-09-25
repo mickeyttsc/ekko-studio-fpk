@@ -52,7 +52,13 @@ NODE_PREFIX="${DATA_DIR}/node"
 HERMES_BIN="${NODE_PREFIX}/lib/node_modules/hermes-web-ui/bin/hermes-web-ui.mjs"
 LOG_FILE="${TRIM_PKGVAR:-/tmp/hermes-studio-var}/info.log"
 WEB_UI_HOME="${DATA_DIR}"
-PORT="${HERMES_PORT:-8648}"
+PORT="${wizard_port:-${HERMES_PORT:-8648}}"
+# 端口来自安装向导（wizard_port）或环境变量，视为不可信输入：
+# 非数字 / 越界一律回落到默认值，避免把坏值传给 node 或写进桌面入口。
+case "${PORT}" in
+    ''|*[!0-9]*) PORT=8648 ;;
+    *) [ "${PORT}" -ge 1 ] 2>/dev/null && [ "${PORT}" -le 65535 ] 2>/dev/null || PORT=8648 ;;
+esac
 
 HERMES_AGENT_ROOT="${TRIM_PKGHOME}/hermes-agent"
 HERMES_HOME="${TRIM_PKGHOME}/hermes-home"

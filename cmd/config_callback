@@ -1,5 +1,118 @@
 #!/bin/bash
 
-### 配置变更后回调 — hermes-web-ui 通过自带 Web 控制台自行管理配置（admin/123456 登录）
+### 配置变更后回调 —— 应用设置页里改完向导字段后执行
+###
+### 负责把「应用设置」里改的值真正落到运行态：
+###   wizard_port            → 由 cmd/main 在启动时读取，改完需要重启应用才生效
+###   WEIXIN_OPEN_ALL_USERS  → 写入内核真正加载的 .env（$HERMES_HOME/.env）
+###
+### ⛔ 两个历史坑：
+###   1) 之前这里直接 exit 0，什么也不做 —— 用户在应用设置里改端口后毫无反应，
+###      桌面入口跟着变了、实际服务还在老端口上，页面打不开。
+###   2) 微信策略此前写在 ${DATA_DIR}/.hermes/.env，而内核读的是
+###      ${TRIM_PKGHOME}/hermes-home/.env（HERMES_HOME 决定），写了等于没写。
 
+TRIM_APPDEST="${TRIM_APPDEST:-}"
+TRIM_PKGHOME="${TRIM_PKGHOME:-}"
+TRIM_PKGVAR="${TRIM_PKGVAR:-}"
+
+# TRIM_* 自解析（fnOS 偶尔不传）
+_resolve_trim_paths() {
+    local app_link="/var/apps/hermes-studio"
+    if { [ -z "${TRIM_APPDEST}" ] || [ ! -d "${TRIM_APPDEST}" ]; } && [ -e "${app_link}" ]; then
+        TRIM_APPDEST="$(readlink -f "${app_link}" 2>/dev/null)"
+    fi
+    if { [ -z "${TRIM_PKGHOME}" ] || [ ! -d "${TRIM_PKGHOME}" ]; } && [ -L "${app_link}/home" ]; then
+        TRIM_PKGHOME="$(readlink -f "${app_link}/home" 2>/dev/null)"
+    fi
+    if [ -z "${TRIM_PKGVAR}" ] && [ -n "${TRIM_APPDEST}" ]; then
+        local _pv; _pv="$(echo "${TRIM_APPDEST}" | sed 's|/@appcenter/|/@appdata/|')"
+        [ -d "${_pv}" ] && TRIM_PKGVAR="${_pv}"
+    fi
+}
+_resolve_trim_paths
+
+LOG_FILE="${TRIM_PKGVAR:-/tmp/hermes-studio-var}/info.log"
+mkdir -p "$(dirname "${LOG_FILE}")" 2>/dev/null || true
+
+log_msg() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - [config] $1" >> "${LOG_FILE}" 2>/dev/null || true
+}
+
+log_msg "=== config_callback start (port=${wizard_port:-未设置} weixin_open=${WEIXIN_OPEN_ALL_USERS:-未设置}) ==="
+
+# ── 1) 微信 DM 策略：写入内核真正加载的 .env ────────────────────────────────
+# 与 install_callback 的 configure_weixin_policy 保持同一落点（$HERMES_HOME/.env）。
+configure_weixin_policy() {
+    local hermes_env="${TRIM_PKGHOME}/hermes-home/.env"
+    [ -n "${TRIM_PKGHOME}" ] || { log_msg "TRIM_PKGHOME 为空，跳过微信策略写入"; return 0; }
+
+    is_truthy() {
+        case "${1:-}" in
+            [Tt]rue|[Yy]es|[Oo]n|1) return 0 ;;
+            *) return 1 ;;
+        esac
+    }
+
+    if is_truthy "${WEIXIN_OPEN_ALL_USERS}"; then
+        mkdir -p "$(dirname "${hermes_env}")"
+        [ -f "${hermes_env}" ] || touch "${hermes_env}"
+
+        if ! grep -qF "# Weixin DM policy configured by fnOS installer" "${hermes_env}" 2>/dev/null; then
+            cat >> "${hermes_env}" <<'ENV_EOF'
+
+# Weixin DM policy configured by fnOS installer
+# WARNING: open policy allows ANY weixin user to message this bot.
+ENV_EOF
+        fi
+
+        for kv in 'WEIXIN_DM_POLICY=open' 'WEIXIN_ALLOW_ALL_USERS=true'; do
+            local key="${kv%%=*}"
+            if grep -qE "^[[:space:]]*${key}=" "${hermes_env}" 2>/dev/null; then
+                sed -i -E "s|^[[:space:]]*${key}=.*|${kv}|" "${hermes_env}" 2>/dev/null || true
+            else
+                echo "${kv}" >> "${hermes_env}" 2>/dev/null || true
+            fi
+        done
+
+        [ -n "${TRIM_USERNAME}" ] && chown "${TRIM_USERNAME}:${TRIM_USERNAME}" "${hermes_env}" 2>/dev/null || true
+        chmod 600 "${hermes_env}" 2>/dev/null || true
+
+        if grep -q '^WEIXIN_ALLOW_ALL_USERS=true' "${hermes_env}" 2>/dev/null; then
+            log_msg "微信策略已置为 OPEN 并回读确认 (${hermes_env})"
+        else
+            log_msg "WARNING: 微信策略写入后回读失败 (${hermes_env})"
+        fi
+    else
+        # 关闭时要显式改回白名单：只写不清的老问题会让用户「关掉」开关后策略仍是 open
+        if [ -f "${hermes_env}" ] && grep -qE '^[[:space:]]*WEIXIN_ALLOW_ALL_USERS=' "${hermes_env}" 2>/dev/null; then
+            sed -i -E 's|^[[:space:]]*WEIXIN_ALLOW_ALL_USERS=.*|WEIXIN_ALLOW_ALL_USERS=false|' "${hermes_env}" 2>/dev/null || true
+            sed -i -E 's|^[[:space:]]*WEIXIN_DM_POLICY=.*|WEIXIN_DM_POLICY=allowlist|' "${hermes_env}" 2>/dev/null || true
+            log_msg "微信策略已改回白名单 (allowlist)"
+        else
+            log_msg "微信策略保持默认白名单（.env 中无该键，无需改动）"
+        fi
+    fi
+}
+configure_weixin_policy
+
+# ── 2) 端口变更：需要重启应用才会生效（cmd/main 在启动时读 wizard_port）──
+# 主动重启，避免出现「桌面入口已指向新端口、服务还在旧端口」的错位状态。
+if [ -n "${wizard_port}" ] && [ -x "${TRIM_APPDEST}/cmd/main" ]; then
+    case "${wizard_port}" in
+        ''|*[!0-9]*) log_msg "wizard_port 非数字，跳过重启" ;;
+        *)
+            if [ "${wizard_port}" -ge 1 ] 2>/dev/null && [ "${wizard_port}" -le 65535 ] 2>/dev/null; then
+                log_msg "端口已改为 ${wizard_port}，重启应用使新端口生效 ..."
+                "${TRIM_APPDEST}/cmd/main" stop 2>/dev/null || true
+                sleep 1
+                "${TRIM_APPDEST}/cmd/main" start 2>/dev/null || log_msg "WARNING: 重启应用失败，请手动在应用中心重启"
+            else
+                log_msg "wizard_port 越界 (${wizard_port})，跳过重启"
+            fi
+            ;;
+    esac
+fi
+
+log_msg "=== config_callback end ==="
 exit 0

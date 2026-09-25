@@ -8,15 +8,40 @@
             },
             {
                 "type": "tips",
-                "helpText": "<br>本包已内置 hermes-web-ui 运行时与依赖（非 Docker、安装时无需联网编译），安装会很快完成。"
+                "helpText": "<br>本包已内置 Web UI 运行时与全部依赖（非 Docker），<b>安装时无需联网编译</b>，安装过程会很快完成。"
             },
             {
                 "type": "tips",
-                "helpText": "<br>首次启动会在后台安装 Hermes Agent 内核（约 1-3 分钟，已内置离线源码包），期间即可打开页面。"
+                "helpText": "<br>安装后首次启动会在后台准备 Hermes Agent 内核（已内置离线源码包，约 1-3 分钟）。期间页面即可打开，但对话功能要等内核就绪。"
             },
             {
                 "type": "tips",
-                "helpText": "<br>安装完成后，点击桌面图标在浏览器打开 Web UI，使用默认账号 <b>admin / 123456</b> 登录，随后在「设置」中配置模型 API Key 即可使用。"
+                "helpText": "<br>完成后点击桌面图标即可在浏览器打开，默认账号 <b>admin / 123456</b>；登录后请在「设置」中配置模型 API Key 再开始使用。"
+            }
+        ]
+    },
+    {
+        "stepTitle": "服务端口",
+        "items": [
+            {
+                "type": "tips",
+                "helpText": "<br>Ekko Studio 的 Web 界面监听端口。默认 <b>8648</b>；若该端口已被其它应用占用，请改成空闲端口（桌面图标会自动跟随该值）。"
+            },
+            {
+                "type": "text",
+                "field": "wizard_port",
+                "label": "Web 服务端口",
+                "initValue": "8648",
+                "rules": [
+                    {
+                        "required": true,
+                        "message": "请填写服务端口"
+                    },
+                    {
+                        "pattern": "^[0-9]+$",
+                        "message": "端口只能是数字"
+                    }
+                ]
             }
         ]
     },

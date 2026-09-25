@@ -1,14 +1,100 @@
 #!/bin/bash
 
 ### 卸载后回调
-### wizard_delete_data="true"  → 删除全部数据（含 Node 运行时与 hermes-web-ui）
-### wizard_delete_data="false" → 保留全部（升级/重装时不破坏环境）
+###
+### wizard_delete_data 取值（向导里是三选一）：
+###   false     → 保留全部（默认；升级/重装时可继续使用）
+###   runtime   → 只删运行环境（data/ 与 @appdata/），保留用户数据与内核
+###   true      → 完全删除（data/ + @appdata/ + hermes-home/ + hermes-agent/）
+###
+### ⛔ 历史 bug：老版本向导写的是「完全删除（包括 Node 运行时、配置与数据库）」，
+###    但代码只删了 ${TRIM_PKGHOME}/data 和 ${TRIM_PKGVAR}，**用户真正的数据目录
+###    ${TRIM_PKGHOME}/hermes-home（会话、记忆、技能、cron、AGENTS.md/SOUL.md、
+###    含 API Key 与渠道 token 的 .env）以及内核目录 hermes-agent 从来没被删过**。
+###    用户在卸载界面选「完全删除」后，密钥与全部会话仍留在盘上，与提示严重不符。
+###    现在按提示的语义如实删除。
 
-[ -z "${TRIM_PKGHOME}" ] && exit 0
+# TRIM_* 自解析：卸载流程里 fnOS 偶尔不传。写死卷号在这里更危险 —— 可能什么都没删
+# 却返回成功，用户以为已清干净。解析失败时破坏性删除一律拒绝执行。
+_resolve_trim_paths() {
+    local app_link="/var/apps/hermes-studio"
+    if { [ -z "${TRIM_APPDEST}" ] || [ ! -d "${TRIM_APPDEST}" ]; } && [ -e "${app_link}" ]; then
+        TRIM_APPDEST="$(readlink -f "${app_link}" 2>/dev/null)"
+    fi
+    if { [ -z "${TRIM_PKGHOME}" ] || [ ! -d "${TRIM_PKGHOME}" ]; } && [ -L "${app_link}/home" ]; then
+        TRIM_PKGHOME="$(readlink -f "${app_link}/home" 2>/dev/null)"
+    fi
+    if { [ -z "${TRIM_PKGVAR}" ] || [ ! -d "${TRIM_PKGVAR}" ]; } && [ -L "${app_link}/var" ]; then
+        TRIM_PKGVAR="$(readlink -f "${app_link}/var" 2>/dev/null)"
+    fi
+    if [ -z "${TRIM_PKGHOME}" ] && [ -n "${TRIM_APPDEST}" ]; then
+        local _ph; _ph="$(echo "${TRIM_APPDEST}" | sed 's|/@appcenter/|/@apphome/|')"
+        [ -d "${_ph}" ] && TRIM_PKGHOME="${_ph}"
+    fi
+    if [ -z "${TRIM_PKGVAR}" ] && [ -n "${TRIM_APPDEST}" ]; then
+        local _pv; _pv="$(echo "${TRIM_APPDEST}" | sed 's|/@appcenter/|/@appdata/|')"
+        [ -d "${_pv}" ] && TRIM_PKGVAR="${_pv}"
+    fi
+}
+_resolve_trim_paths
 
-if [ "${wizard_delete_data}" = "true" ]; then
-    rm -rf "${TRIM_PKGHOME}/data"
-    [ -n "${TRIM_PKGVAR}" ] && rm -rf "${TRIM_PKGVAR}" 2>/dev/null || true
+# ── 破坏性删除前的路径安全校验 ──────────────────────────────────────────────
+# 只允许删除形如 /vol<N>/@app{home,data,center,temp,meta,conf}/<appname> 的应用专属目录。
+# 拒绝空值、拒绝根目录、拒绝任何非应用目录 —— 防止 TRIM_* 解析异常时误删系统路径。
+safe_rm_appdir() {
+    local target="$1"
+    [ -n "${target}" ] || return 1
+    case "${target}" in
+        /vol[0-9]*/@apphome/hermes-studio|\
+        /vol[0-9]*/@appdata/hermes-studio|\
+        /vol[0-9]*/@appcenter/hermes-studio|\
+        /vol[0-9]*/@apptemp/hermes-studio|\
+        /vol[0-9]*/@appmeta/hermes-studio|\
+        /vol[0-9]*/@appconf/hermes-studio)
+            rm -rf "${target}"
+            return $?
+            ;;
+        *)
+            echo "REFUSING to remove unexpected path: ${target}" >&2
+            return 1
+            ;;
+    esac
+}
+
+# 先停应用与残留进程。⛔ 一律用本应用专属路径锚定，绝不使用宽泛关键词
+# （"bin/hermes-web-ui" / "dist/server/index.js" 会误杀同机 Docker 版官方容器
+# 与其它 Hermes 应用，导致"装一个、坏一个"的连锁故障）。
+if [ -x "${TRIM_APPDEST}/cmd/main" ]; then
+    "${TRIM_APPDEST}/cmd/main" stop 2>/dev/null || true
 fi
+for pat in "${TRIM_PKGHOME}/data/node/lib/node_modules/hermes-web-ui" \
+           "${TRIM_PKGHOME}/hermes-agent/venv/bin/hermes"; do
+    [ -n "${pat}" ] || continue
+    pkill -TERM -f "${pat}" 2>/dev/null || true
+done
+sleep 2
+for pat in "${TRIM_PKGHOME}/data/node/lib/node_modules/hermes-web-ui" \
+           "${TRIM_PKGHOME}/hermes-agent/venv/bin/hermes"; do
+    [ -n "${pat}" ] || continue
+    pkill -9 -f "${pat}" 2>/dev/null || true
+done
+
+case "${wizard_delete_data}" in
+    true)
+        echo "完全删除：移除用户数据、运行环境与内核 ..."
+        safe_rm_appdir "${TRIM_PKGHOME}/data"
+        safe_rm_appdir "${TRIM_PKGHOME}/hermes-home"
+        safe_rm_appdir "${TRIM_PKGHOME}/hermes-agent"
+        [ -n "${TRIM_PKGVAR}" ] && safe_rm_appdir "${TRIM_PKGVAR}"
+        ;;
+    runtime)
+        echo "仅移除运行环境：保留用户数据与内核 ..."
+        safe_rm_appdir "${TRIM_PKGHOME}/data"
+        [ -n "${TRIM_PKGVAR}" ] && safe_rm_appdir "${TRIM_PKGVAR}"
+        ;;
+    *)
+        echo "保留全部数据（未删除任何用户数据）"
+        ;;
+esac
 
 exit 0

@@ -1,19 +1,30 @@
-[{
-  "stepTitle": "卸载 Ekko Studio",
-  "items": [
-    {
-      "type": "tips",
-      "helpText": "请选择数据清理方式。"
-    },
-    {
-      "type": "radio",
-      "field": "wizard_delete_data",
-      "label": "保留用户数据（推荐 — 下次安装时可继续使用）",
-      "initValue": "false",
-      "options": [
-        { "label": "保留数据", "value": "false" },
-        { "label": "完全删除（包括 Node 运行时、配置与数据库）", "value": "true" }
-      ]
-    }
-  ]
-}]
+[
+  {
+    "stepTitle": "卸载 Ekko Studio",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "<b>请选择数据清理方式。</b><br>卸载会移除程序本体；下面决定是否一并删除数据目录。"
+      },
+      {
+        "type": "radio",
+        "field": "wizard_delete_data",
+        "label": "数据清理方式",
+        "initValue": "false",
+        "options": [
+          { "label": "保留数据（推荐 — 重新安装后会话、记忆、技能与模型配置都还在）", "value": "false" },
+          { "label": "只删运行环境（释放约 3.6 GB；保留会话/记忆/技能/API Key 与内核）", "value": "runtime" },
+          { "label": "完全删除（不可恢复 — 连同会话、记忆、技能、API Key、模型与内核一并删除）", "value": "true" }
+        ]
+      },
+      {
+        "type": "tips",
+        "helpText": "<br>「保留数据」与「只删运行环境」都会留下 <b>hermes-home</b> 目录（会话、记忆、技能、定时任务、AGENTS.md / SOUL.md，以及保存 API Key 与渠道 token 的 .env）。如需彻底清除凭据，请选「完全删除」，或卸载后手动删除该目录。"
+      },
+      {
+        "type": "tips",
+        "helpText": "<br>「完全删除」还会移除 Hermes Agent 内核（hermes-agent），下次安装需重新下载，首次启动会慢一些。"
+      }
+    ]
+  }
+]

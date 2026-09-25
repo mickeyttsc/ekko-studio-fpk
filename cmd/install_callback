@@ -156,8 +156,13 @@ preinstall_cleanup() {
     # 1) Node.js 可用性已在上文确认
     log_msg "Node.js OK: ${NODE_ROOT}"
 
-    # 2) 检查 8648 端口占用并杀掉（用户明确要求的"端口冲突处理"）
-    local port=8648
+    # 2) 检查目标端口占用并释放（用户明确要求的"端口冲突处理"）
+    #    端口取自安装向导 wizard_port（未填则 8648），与 cmd/main 的取值口径一致。
+    local port="${wizard_port:-8648}"
+    case "${port}" in
+        ''|*[!0-9]*) port=8648 ;;
+        *) [ "${port}" -ge 1 ] 2>/dev/null && [ "${port}" -le 65535 ] 2>/dev/null || port=8648 ;;
+    esac
     local port_pids=""
     if command -v ss >/dev/null 2>&1; then
         port_pids=$(ss -tlnp 2>/dev/null | awk -v p=":${port}" '$0 ~ p && /pid=/ {
@@ -623,7 +628,14 @@ fi
 # 如果用户在 wizard 中勾选"允许所有微信用户发送消息"，则写入
 # WEIXIN_DM_POLICY=open + WEIXIN_ALLOW_ALL_USERS=true 到 ~/.hermes/.env。
 configure_weixin_policy() {
-    local hermes_env="${DATA_DIR}/.hermes/.env"
+    # ⛔ 必须写到内核真正加载的 .env。
+    #    内核通过 HERMES_HOME 定位配置，cmd/main 把 HERMES_HOME 设为 ${TRIM_PKGHOME}/hermes-home，
+    #    load_hermes_dotenv() 读的是 $HERMES_HOME/.env。而这里此前写的是 ${DATA_DIR}/.hermes/.env
+    #    —— 那个目录在内核默认布局（$HOME/.hermes）下才成立，本 fpk 把 HOME 设成了 data/，
+    #    实际内核读的是 hermes-home/.env。写错地方 = 用户在安装向导勾了「允许所有微信用户」
+    #    也完全不生效（无任何报错，静默失效）。
+    #    与 cmd/main、AGENTS.md 里记录的落点保持一致。
+    local hermes_env="${TRIM_PKGHOME}/hermes-home/.env"
 
     is_truthy() {
         case "${1:-}" in
@@ -663,7 +675,13 @@ ENV_EOF
                 log_msg "WARNING: chown $(dirname "${hermes_env}") failed (non-fatal)"
         fi
         chmod 600 "${hermes_env}" 2>/dev/null || true
-        log_msg "Weixin DM policy set to OPEN (all users allowed)"
+
+        # 落盘后回读校验：写错路径时这里能立刻发现，而不是静默失效
+        if grep -q '^WEIXIN_ALLOW_ALL_USERS=true' "${hermes_env}" 2>/dev/null; then
+            log_msg "Weixin DM policy set to OPEN (all users allowed) — verified at ${hermes_env}"
+        else
+            log_msg "WARNING: 微信策略写入后回读失败，${hermes_env} 未生效"
+        fi
     else
         log_msg "WEIXIN_OPEN_ALL_USERS not set or false -> keeping default allowlist DM policy"
     fi

@@ -93,6 +93,65 @@ if ! grep -qE '^config/privilege$' "$TMP/inner.list"; then
 fi
 echo "✅ 内层含 config/privilege"
 
+# 桌面入口必须是 ${wizard_port}（端口可配）而不是写死值：
+# 写死会让「应用设置里改端口」失效 —— 入口跟着变、服务还在老端口，页面打不开。
+if ! grep -qE '^ui/config$' "$TMP/inner.list"; then
+    echo "::error:: 内层缺 ui/config，桌面图标无法注册"
+    exit 1
+fi
+tar xzf "$TMP/app.tgz" -C "$TMP" ui/config
+if ! grep -q '\${wizard_port}' "$TMP/ui/config"; then
+    echo "::error:: ui/config 的 port 未使用 \${wizard_port}，端口将无法在应用设置中修改"
+    exit 1
+fi
+echo "✅ ui/config 端口使用 \${wizard_port}（可在应用设置中修改）"
+
+# 三个向导文件必须存在且是合法 JSON（安装/卸载/配置界面的全部内容都在这）
+for w in install uninstall config; do
+    if ! grep -qE "^wizard/${w}$" "$TMP/outer.list"; then
+        echo "::error:: 外层缺 wizard/${w}（安装/卸载/配置界面会缺步骤）"
+        exit 1
+    fi
+    if ! python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$TMP/wizard/$w" 2>/dev/null; then
+        echo "::error:: wizard/${w} 不是合法 JSON，fnOS 无法解析该向导"
+        exit 1
+    fi
+done
+echo "✅ wizard/install|uninstall|config 均存在且为合法 JSON"
+
+# 卸载向导与卸载回调必须语义一致：
+# 向导里出现的每个 value，uninstall_callback 都要能处理；否则用户选了却被静默忽略
+# （历史 bug：向导承诺「完全删除」，回调只删 data/，用户密钥与全部会话留在盘上）。
+# 处理方式有两种：显式分支 `value)`，或落到 `*)` 默认分支（必须有默认分支兜底）。
+HAS_DEFAULT=0
+grep -qE '^[[:space:]]*\*\)' "$TMP/cmd/uninstall_callback" && HAS_DEFAULT=1
+for v in false runtime true; do
+    if grep -qE "\"value\": \"${v}\"" "$TMP/wizard/uninstall"; then
+        if grep -qE "(^|[[:space:]])${v}\)" "$TMP/cmd/uninstall_callback"; then
+            continue
+        fi
+        if [ "${HAS_DEFAULT}" = "1" ]; then
+            continue   # 由 *) 默认分支兜底
+        fi
+        echo "::error:: 卸载向导提供选项 '${v}'，但 cmd/uninstall_callback 既无该分支也无 *) 兜底（用户选择会被静默忽略）"
+        exit 1
+    fi
+done
+echo "✅ 卸载向导选项与 uninstall_callback 处理分支一致"
+
+# 微信策略必须写到内核真正加载的 .env（$HERMES_HOME/.env = hermes-home/.env）：
+# 写到 data/.hermes/.env 等于没写（内核读不到），用户在向导里的选择静默失效。
+if ! grep -q 'hermes-home/.env' "$TMP/cmd/install_callback"; then
+    echo "::error:: install_callback 的微信策略未写到 hermes-home/.env（内核实际加载路径），设置将静默失效"
+    exit 1
+fi
+# 只查【可执行代码行】，跳过注释 —— 否则解释性注释里提到旧路径就会误报
+if grep -vE '^[[:space:]]*#' "$TMP/cmd/install_callback" | grep -q 'DATA_DIR}/\.hermes/\.env'; then
+    echo "::error:: install_callback 仍写着内核读不到的 data/.hermes/.env 路径"
+    exit 1
+fi
+echo "✅ 微信策略写入内核实际加载的 hermes-home/.env"
+
 if grep -qE '^(app/)?skills/' "$TMP/inner.list"; then
     echo "::error:: FPK 内层携带 skills/ 目录，安装时会覆盖用户技能库；请从仓库删除后再构建"
     exit 1

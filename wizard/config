@@ -1,0 +1,48 @@
+[
+    {
+        "stepTitle": "服务端口",
+        "items": [
+            {
+                "type": "tips",
+                "helpText": "修改 Web 界面监听端口。保存后应用会重启，请用新端口访问。"
+            },
+            {
+                "type": "text",
+                "field": "wizard_port",
+                "label": "Web 服务端口",
+                "rules": [
+                    {
+                        "required": true,
+                        "message": "请输入端口"
+                    },
+                    {
+                        "pattern": "^[0-9]+$",
+                        "message": "端口只能是数字"
+                    },
+                    {
+                        "pattern": "^([1-9][0-9]{3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$",
+                        "message": "无效端口，请输入 1024-65535 之间的端口"
+                    }
+                ]
+            }
+        ]
+    },
+    {
+        "stepTitle": "微信渠道访问控制",
+        "items": [
+            {
+                "type": "tips",
+                "helpText": "微信私聊（DM）默认白名单：只有在此手动添加过的用户才能发消息。开启后任何微信用户都能发消息。"
+            },
+            {
+                "type": "radio",
+                "field": "WEIXIN_OPEN_ALL_USERS",
+                "label": "是否允许所有微信用户发送消息？",
+                "options": [
+                    { "label": "否，保持白名单（安全，推荐）", "value": "false" },
+                    { "label": "是，允许所有人（绕过白名单，风险自负）", "value": "true" }
+                ]
+            }
+        ]
+    }
+]

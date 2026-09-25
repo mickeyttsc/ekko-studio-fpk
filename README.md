@@ -197,6 +197,14 @@ CLI 无 upgrade 子命令）。可行路径 = **应用中心 UI 手动安装新 
 | 24 | **`echo "$大字符串" \| grep -q` 在 `pipefail` 下产生假阴性** —— 内层清单 3 万多行（400KB+）超过管道缓冲区，`grep -q` 命中即早退 → `echo` 收 SIGPIPE(141) → `if ! echo "$L" \| grep -q X` 被判成「未命中」，**安全检查静默通过**；`echo "$L" \| head -1` 则直接 rc=141 判失败（曾实际挂掉 CI） | 清单一律先写文件再 `grep`/`sed`；门禁集中在 `scripts/verify-fpk-gates.sh`，并带「反自检」断言 grep 通路是活的 |
 | 25 | **Python 3.11 不支持 `tarfile.extract(filter=)`** —— 该参数是 3.12+ 才有，3.11 直接 `TypeError` 中断打包 | try/except 兼容两者 |
 | 26 | **门禁只查结构不查必需内容** —— 构建「绿」了但包里没有内核/原生模块 | 逐条断言必需件存在；CI 与本机共用 `verify-fpk-gates.sh`（单一份逻辑，避免漂移） |
+| 27 | **卸载向导承诺「完全删除」，回调只删 `data/`** —— 用户真正的数据目录 `hermes-home/`（会话、记忆、技能、cron、AGENTS.md/SOUL.md、含 API Key 与渠道 token 的 `.env`）与内核 `hermes-agent/` **从来没被删过**，密钥留在盘上而界面说已清干净 | 卸载向导改三选一（保留 / 只删运行环境 / 完全删除）并在 `uninstall_callback` 按语义如实删除；破坏性删除前做路径白名单校验（只允许 `/vol<N>/@app{home,data,...}/hermes-studio`）；CI 门禁核对「向导每个选项都有对应处理分支」 |
+| 28 | **微信策略写到内核读不到的路径** —— 写的是 `${DATA_DIR}/.hermes/.env`，而内核按 `HERMES_HOME` 读 `${TRIM_PKGHOME}/hermes-home/.env`。用户在安装向导勾「允许所有微信用户」完全不生效且无报错 | 落点改为 `hermes-home/.env`；写入后回读校验；CI 门禁拦死旧路径 |
+| 29 | **只写不清的开关** —— 用户把「允许所有微信用户」关掉后，`.env` 里的 `WEIXIN_ALLOW_ALL_USERS=true` 仍在，策略实际没关 | `config_callback` 关闭时显式改回 `allowlist` / `false` |
+| 30 | **端口写死，应用设置改不动** —— 桌面入口 `ui/config` 里 `port` 硬编码 8648，用户在应用设置里改端口后入口变了、服务还在老端口 | 向导新增 `wizard_port`，`ui/config` 用 `${wizard_port}`（fnOS 会替换；已装应用 `cleanfnos` 实证该机制存在），`cmd/main` 读取并做数字/范围校验，`config_callback` 改完端口主动重启 |
+| 31 | **上游 `fnpack --version` 校验本身是坏的** —— `fnpack` 没有 `--version` 子命令（exit 1），上游 CI 里 `curl && chmod && mv && command -v && fnpack --version` 因此**永远失败**，加上 `continue-on-error` 就静默降级到 tar 兜底 | 新仓库改用 `command -v fnpack` 判断，fnpack 真正生效（实测走官方打包路径） |
+| 32 | **向导文案与实现不符** —— 上游写「首次安装会自动下载 Node.js 运行时并全局安装 hermes-web-ui，请耐心等待」，实际是内置 bundled 运行时离线复制，几秒完成 | 文案按真实行为改写（内置依赖、安装很快、首启后台装内核） |
+| 33 | **配置向导缺失** —— 上游没有 `wizard/config`，装完无法在应用设置里调整端口/微信策略 | 新增 `wizard/config` + `config_callback` 真正落地变更 |
+| 34 | **上游在 `install_callback` 里注入 `trim-cli` 技能** —— `rm -rf` 用户技能目录后覆盖，会打回旧版 | 不内置任何技能；CI 门禁查内外两层 |
 
 ---
 
