@@ -194,6 +194,9 @@ CLI 无 upgrade 子命令）。可行路径 = **应用中心 UI 手动安装新 
 | 21 | **包内携带 `skills/`** → 安装/升级时覆盖用户技能库 | 不内置任何技能；CI 门禁查内外两层 |
 | 22 | **构建机绝对路径污染** —— `/home/runner/...` 被带进包导致 `install_callback` 找不到 `node_modules` 而回退 npm | 相对路径镜像 + CI 门禁 |
 | 23 | **`cp -a` 遇上 git gc 竞态会 stat 失败中断打包** | 源码复制用 `tar` 管道并排除 `.git` |
+| 24 | **`echo "$大字符串" \| grep -q` 在 `pipefail` 下产生假阴性** —— 内层清单 3 万多行（400KB+）超过管道缓冲区，`grep -q` 命中即早退 → `echo` 收 SIGPIPE(141) → `if ! echo "$L" \| grep -q X` 被判成「未命中」，**安全检查静默通过**；`echo "$L" \| head -1` 则直接 rc=141 判失败（曾实际挂掉 CI） | 清单一律先写文件再 `grep`/`sed`；门禁集中在 `scripts/verify-fpk-gates.sh`，并带「反自检」断言 grep 通路是活的 |
+| 25 | **Python 3.11 不支持 `tarfile.extract(filter=)`** —— 该参数是 3.12+ 才有，3.11 直接 `TypeError` 中断打包 | try/except 兼容两者 |
+| 26 | **门禁只查结构不查必需内容** —— 构建「绿」了但包里没有内核/原生模块 | 逐条断言必需件存在；CI 与本机共用 `verify-fpk-gates.sh`（单一份逻辑，避免漂移） |
 
 ---
 
