@@ -1,0 +1,19 @@
+[{
+  "stepTitle": "卸载 Ekko Studio",
+  "items": [
+    {
+      "type": "tips",
+      "helpText": "请选择数据清理方式。"
+    },
+    {
+      "type": "radio",
+      "field": "wizard_delete_data",
+      "label": "保留用户数据（推荐 — 下次安装时可继续使用）",
+      "initValue": "false",
+      "options": [
+        { "label": "保留数据", "value": "false" },
+        { "label": "完全删除（包括 Node 运行时、配置与数据库）", "value": "true" }
+      ]
+    }
+  ]
+}]

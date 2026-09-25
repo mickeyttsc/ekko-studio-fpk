@@ -1,0 +1,190 @@
+name: Auto-update upstream versions
+
+# 自动跟踪上游并触发重建（只负责「检测 + bump + 提交」，不负责发布）：
+#
+#   1. hermes-web-ui：跟踪官方 GitHub Release（EKKOLearnAI/ekko-studio）中
+#      「同时带 hermes-web-ui-<ver>.tar.gz 与其 .sha256 sidecar」的最新版本。
+#      该 release 线被官方显式标记为非 latest，所以不能取 releases/latest，
+#      必须自行过滤版本标签并按 published_at 取最新。
+#      注意：同一仓库还会发手机端 release（如 v1.0.4 只含 .apk）—— 必须按
+#      「是否带预构建产物」过滤，否则手机端版本会抢先入选、再因缺少预构建
+#      产物校验失败而中止整天更新。
+#
+#   2. hermes-agent：跟踪 NousResearch/hermes-agent 最新 release 标签
+#      （日期式标签，如 v2026.9.24）。
+#
+# 任一与 config/bootstrap/*.env 记录不一致时：
+#   - 更新 env 文件与 manifest 版本号
+#   - 把上游产物的 sha256 固定进 config/upstream/<asset>.env（供应链校验锚点）
+#   - commit + push 到 main
+#
+# ⚠️ 发布职责归属：本 workflow 【不建 Release、不传资产】。
+#    Release 由 build.yml 独占（一个 Release 只能有一个归属方）。历史上两处
+#    都写「建 Release」导致 build 侧的 tag 门禁在 dispatch 运行下静默跳过，
+#    巡检侧拿到 releases/tags/<tag> = null → 上传打 /releases/null/assets 404，
+#    整条链路每轮都红且永不产出。
+#
+# ⚠️ 所有 api.github.com 调用必须带 Authorization：Actions runner 的出口 IP
+#    为 GitHub 全平台共享，未鉴权请求走 60 次/小时的 IP 级配额，常被其它仓库
+#    耗尽 → 403 → JSON 解析失败 → 「同步上游」静默失效。带 token 后为 5000/小时。
+#    上游探测逻辑集中在 scripts/detect-upstream.py，该脚本自身带鉴权头，
+#    并可在本机直接跑（不依赖 CI 才能验证）。
+#
+# ⚠️ GITHUB_TOKEN 推送不触发 push 事件（GitHub 防递归策略），所以 bump 提交后
+#    只能靠 build.yml 的 workflow_run 接力构建。
+
+on:
+  schedule:
+    # 每 2 小时检查一次上游（避开整点，降低 GitHub 限流概率）
+    - cron: '23 */2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Detect latest upstream versions
+        id: detect
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          WEBUI_LATEST="$(python3 scripts/detect-upstream.py webui)"
+          [ -n "${WEBUI_LATEST}" ] || { echo "::error:: 未能解析出可打包的 hermes-web-ui 版本，中止更新"; exit 1; }
+
+          AGENT_LATEST="$(python3 scripts/detect-upstream.py agent)"
+          [ -n "${AGENT_LATEST}" ] || { echo "::error:: 未能解析 hermes-agent 最新 release 标签，中止更新"; exit 1; }
+
+          echo "上游最新：hermes-web-ui=${WEBUI_LATEST}  hermes-agent=${AGENT_LATEST}"
+
+          # 校验 hermes-agent 标签真实存在（用 git/refs/tags 单请求检查，无重定向，
+          # 比下载 tarball 稳 —— tarball 要跟随 302→codeload，瞬时故障概率高）
+          if ! python3 scripts/detect-upstream.py agent-tag-exists "${AGENT_LATEST}"; then
+            echo "::error:: GitHub 上不存在 hermes-agent 标签 ${AGENT_LATEST}，中止更新"
+            exit 1
+          fi
+
+          # 抓取上游资产的 sha256（写入 config/upstream/ 作为构建期的固定校验锚点）
+          WEBUI_SHA="$(python3 scripts/detect-upstream.py sha256 "${WEBUI_LATEST}")"
+          if ! printf '%s' "${WEBUI_SHA}" | grep -qE '^[0-9a-f]{64}$'; then
+            echo "::error:: 官方 release v${WEBUI_LATEST} 缺少 hermes-web-ui-${WEBUI_LATEST}.tar.gz.sha256 或格式非法，中止更新"
+            exit 1
+          fi
+          echo "上游资产 sha256: ${WEBUI_SHA}"
+
+          {
+            echo "webui_latest=${WEBUI_LATEST}"
+            echo "agent_latest=${AGENT_LATEST}"
+            echo "webui_sha=${WEBUI_SHA}"
+            echo "webui_asset=hermes-web-ui-${WEBUI_LATEST}.tar.gz"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Compare and bump
+        id: bump
+        run: |
+          set -euo pipefail
+          WEBUI_LATEST="${{ steps.detect.outputs.webui_latest }}"
+          AGENT_LATEST="${{ steps.detect.outputs.agent_latest }}"
+          WEBUI_SHA="${{ steps.detect.outputs.webui_sha }}"
+          WEBUI_ASSET="${{ steps.detect.outputs.webui_asset }}"
+
+          WEBUI_ENV=config/bootstrap/hermes-studio-version.env
+          AGENT_ENV=config/bootstrap/hermes-agent-version.env
+          PIN_ENV="config/upstream/${WEBUI_ASSET}.env"
+
+          CUR_WEBUI="$(grep '^HERMES_STUDIO_VERSION=' "$WEBUI_ENV" | cut -d= -f2)"
+          CUR_AGENT="$(grep '^HERMES_AGENT_VERSION=' "$AGENT_ENV" | cut -d= -f2)"
+
+          CUR_VER="$(grep '^version' manifest | cut -d= -f2 | tr -d ' ')"
+          CUR_BASE="${CUR_VER%-*}"
+          CUR_BUILD="${CUR_VER##*-}"
+          case "${CUR_BUILD}" in
+            ''|*[!0-9]*) CUR_BUILD=0 ;;
+          esac
+
+          echo "当前：webui=${CUR_WEBUI} agent=${CUR_AGENT} fpk=${CUR_VER}"
+          echo "上游：webui=${WEBUI_LATEST} agent=${AGENT_LATEST}"
+
+          CHANGED=0
+          if [ "${WEBUI_LATEST}" != "${CUR_WEBUI}" ]; then
+            sed -i "s/^HERMES_STUDIO_VERSION=.*/HERMES_STUDIO_VERSION=${WEBUI_LATEST}/" "$WEBUI_ENV"
+            CHANGED=1
+            echo "web-ui 更新: ${CUR_WEBUI} -> ${WEBUI_LATEST}"
+          fi
+          if [ "${AGENT_LATEST}" != "${CUR_AGENT}" ]; then
+            sed -i "s/^HERMES_AGENT_VERSION=.*/HERMES_AGENT_VERSION=${AGENT_LATEST}/" "$AGENT_ENV"
+            CHANGED=1
+            echo "agent 更新: ${CUR_AGENT} -> ${AGENT_LATEST}"
+          fi
+
+          # 固定 sha256 进版本控制（供应链校验锚点，构建脚本优先读它）。
+          # 旧版本的 pin 文件同时清理，避免仓库里堆积过期校验值。
+          if [ ! -f "$PIN_ENV" ] || ! grep -qF "HERMES_WEB_UI_SHA256=${WEBUI_SHA}" "$PIN_ENV" 2>/dev/null; then
+            mkdir -p config/upstream
+            {
+              echo "# 上游 hermes-web-ui 预构建产物的固定校验值（入库，由 auto-update.yml 自动更新）"
+              echo "#"
+              echo "# 为什么固定进版本控制：只做「现拉 sidecar 现比」挡不住上游事后替换同版本"
+              echo "# 资产（sidecar 会跟着一起变，等于没校验）。固定值入库才能发现变更。"
+              echo "# build-fpk.sh 优先读这里的 SHA256，没有才退回拉取上游 <asset>.sha256 sidecar。"
+              echo "HERMES_WEB_UI_VERSION=${WEBUI_LATEST}"
+              echo "HERMES_WEB_UI_SHA256=${WEBUI_SHA}"
+            } > "$PIN_ENV"
+            find config/upstream -maxdepth 1 -name 'hermes-web-ui-*.env' ! -name "$(basename "$PIN_ENV")" -delete 2>/dev/null || true
+            CHANGED=1
+            echo "固定上游校验值: ${PIN_ENV} -> ${WEBUI_SHA}"
+          fi
+
+          if [ "${CHANGED}" != "1" ]; then
+            echo "上下游版本一致，无需更新"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 版本号规则：web-ui 主版本变化则重置 build 为 1，否则 build+1
+          if [ "${WEBUI_LATEST}" != "${CUR_BASE}" ]; then
+            NEW_BASE="${WEBUI_LATEST}"
+            NEW_BUILD=1
+          else
+            NEW_BASE="${CUR_BASE}"
+            NEW_BUILD=$((CUR_BUILD + 1))
+          fi
+          NEW_VER="${NEW_BASE}-${NEW_BUILD}"
+          sed -i "s/^version[[:space:]]*=.*/version               = ${NEW_VER}/" manifest
+
+          echo "新 FPK 版本: ${NEW_VER}"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "new_version=${NEW_VER}" >> "$GITHUB_OUTPUT"
+
+      - name: Commit & push (triggers build via workflow_run)
+        if: steps.bump.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add config/bootstrap/hermes-studio-version.env \
+                  config/bootstrap/hermes-agent-version.env \
+                  config/upstream \
+                  manifest
+          git commit -m "chore: auto-bump upstream -> web-ui ${{ steps.detect.outputs.webui_latest }} / agent ${{ steps.detect.outputs.agent_latest }} (FPK ${{ steps.bump.outputs.new_version }})"
+          git push
+
+      - name: Verify remote landed
+        if: steps.bump.outputs.changed == 'true'
+        run: |
+          # 远端没落地就不算完成：本地 commit 成功 != 远端有该提交
+          set -euo pipefail
+          REMOTE_SHA="$(git ls-remote origin refs/heads/main | cut -f1)"
+          LOCAL_SHA="$(git rev-parse HEAD)"
+          echo "local=${LOCAL_SHA}  remote=${REMOTE_SHA}"
+          [ "${REMOTE_SHA}" = "${LOCAL_SHA}" ] || { echo "::error:: 远端 main 未更新到本次提交，bump 未生效"; exit 1; }
+          echo "✅ bump 已落到远端 main（workflow_run 将接力构建）"

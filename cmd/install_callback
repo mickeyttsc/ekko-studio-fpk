@@ -1,0 +1,728 @@
+#!/bin/bash
+
+### 安装后回调 — 飞牛 fnOS 上安装 Ekko Studio
+###
+### 部署方式：
+###   1. 优先使用 FPK 内 bundled 的 node_modules（app/node/）：本地复制到 data/，
+###      无需联网，安装只需几秒，也不会被 fnOS 安装超时掐断。
+###   2. 若 bundled node 不存在（开发/测试场景），回退到 npm install。
+###
+### 运行时依赖：manifest 中 install_dep_apps=nodejs_v24，由 fnOS 自动安装 Node.js 运行时。
+
+# 注意：不 set -e。install_callback 里会执行大量 chmod/chown/pkill 等
+# 可能因环境差异（用户/卷/残留 root 文件）失败的命令；若 set -e，任一
+# 非关键命令失败都会导致整个安装退出，fnOS 会提示"设置目录权限失败"。
+# 关键步骤（复制文件、写入 marker 等）显式检查并退出；其余容错继续。
+
+# TRIM_PKGVAR 在部分安装流程（如升级回退）中可能为空，务必兜底到 /tmp
+LOG_FILE="${TRIM_PKGVAR:-/tmp/hermes-studio-var}/info.log"
+
+# 确保日志目录存在（install_init 阶段 TRIM_PKGVAR 可能尚未创建）
+mkdir -p "$(dirname "${LOG_FILE}")" 2>/dev/null || true
+
+log_msg() {
+    local msg="$(date '+%Y-%m-%d %H:%M:%S') - [install] $1"
+    echo "$msg"
+    echo "$msg" >> "${LOG_FILE}" 2>/dev/null || true
+}
+
+toast_err() {
+    echo "$*" > "${TRIM_TEMP_LOGFILE:-/tmp/hermes-studio-install.err}"
+}
+
+trap 'toast_err "安装脚本第 ${LINENO} 行出错: $(tail -5 "${SYS_LOG_FILE}" "${LOG_FILE}" 2>/dev/null)"' ERR
+
+# ---------------------------------------------------------------------------
+# 路径与常量
+# ---------------------------------------------------------------------------
+APP_DIR="${TRIM_APPDEST}"
+DATA_DIR="${TRIM_PKGHOME}/data"
+NODE_PREFIX="${DATA_DIR}/node"
+HERMES_BIN="${NODE_PREFIX}/bin/hermes-web-ui"
+BUNDLED_NODE="${APP_DIR}/node"
+# v0.6.33-23 起 FPK 内不再保留 npm 生成的 bin/ 软链（避免 fnOS 解压时因软链损坏/自引用
+# 导致"设置目录权限失败"），改为直接检测真实的 hermes-web-ui 入口 .mjs。
+BUNDLED_BIN="${BUNDLED_NODE}/lib/node_modules/hermes-web-ui/bin/hermes-web-ui.mjs"
+
+# Hermes Agent 路径提前定义，供安装前环境清理使用
+HERMES_AGENT_ROOT="${TRIM_PKGHOME}/hermes-agent"
+HERMES_HOME="${TRIM_PKGHOME}/hermes-home"
+
+export HOME="${DATA_DIR}"
+export HERMES_WEB_UI_HOME="${DATA_DIR}"
+# 编码 Agent CLI 落点对齐上游环境约定（与 cmd/main / app/bin 保持一致）
+export NPM_CONFIG_PREFIX="${DATA_DIR}/coding-agent/npm"
+
+# ---------------------------------------------------------------------------
+# 1. 读取目标版本号
+# ---------------------------------------------------------------------------
+VERSION_ENV="${APP_DIR}/config/bootstrap/hermes-studio-version.env"
+# 兼容部分安装流程未把外层 config 复制到 TRIM_APPDEST 的情况，回退到脚本所在目录的上级
+if [ ! -f "${VERSION_ENV}" ]; then
+    VERSION_ENV="$(cd "$(dirname "$0")/.." && pwd)/config/bootstrap/hermes-studio-version.env"
+fi
+if [ ! -f "${VERSION_ENV}" ]; then
+    toast_err "缺少 config/bootstrap/hermes-studio-version.env，打包不完整"
+    exit 1
+fi
+# shellcheck disable=SC1090
+. "${VERSION_ENV}"
+if [ -z "${HERMES_STUDIO_VERSION}" ]; then
+    toast_err "HERMES_STUDIO_VERSION 未定义"
+    exit 1
+fi
+log_msg "target hermes-web-ui version: ${HERMES_STUDIO_VERSION}"
+
+# ---------------------------------------------------------------------------
+# 2. 定位飞牛应用中心 Node.js v24（install_dep_apps=nodejs_v24 保证存在）
+# ---------------------------------------------------------------------------
+resolve_node_root() {
+    local cand
+    for cand in /var/apps/nodejs_v24/target \
+                /var/apps/nodejs_v22/target \
+                /var/apps/nodejs_v23/target \
+                /vol1/@appcenter/nodejs_v24 \
+                /vol2/@appcenter/nodejs_v24 \
+                /vol3/@appcenter/nodejs_v24 \
+                /vol4/@appcenter/nodejs_v24 \
+                /vol1/@appcenter/nodejs_v22 \
+                /vol2/@appcenter/nodejs_v22 \
+                /vol3/@appcenter/nodejs_v22 \
+                /vol4/@appcenter/nodejs_v22 \
+                /vol1/@appcenter/nodejs_v23 \
+                /vol2/@appcenter/nodejs_v23 \
+                /vol3/@appcenter/nodejs_v23 \
+                /vol4/@appcenter/nodejs_v23; do
+        [ -x "${cand}/bin/node" ] && { echo "${cand}"; return 0; }
+    done
+    return 1
+}
+
+# 重建 npm prefix/bin 符号链接。bundled node 在 Windows 环境打包时 symlink 会被
+# 展平为真实文件，导致 hermes-web-ui bin 脚本按 ../package.json 找不到包根目录。
+fix_bundled_bin_links() {
+    local pkg_dir lib_bin_dir bin_dir rel
+    pkg_dir="${NODE_PREFIX}/lib/node_modules/hermes-web-ui"
+    bin_dir="${NODE_PREFIX}/bin"
+    [ -d "${pkg_dir}/bin" ] || return 0
+
+    # 从 prefix/bin 到 prefix/lib/node_modules/hermes-web-ui/bin 的相对路径
+    rel="../lib/node_modules/hermes-web-ui/bin"
+
+    # hermes-web-ui
+    if [ -f "${pkg_dir}/bin/hermes-web-ui.mjs" ]; then
+        rm -f "${bin_dir}/hermes-web-ui"
+        ln -s "${rel}/hermes-web-ui.mjs" "${bin_dir}/hermes-web-ui" 2>/dev/null || \
+            cp -a "${pkg_dir}/bin/hermes-web-ui.mjs" "${bin_dir}/hermes-web-ui"
+        chmod +x "${bin_dir}/hermes-web-ui" 2>/dev/null || true
+    fi
+    # hermes-web-ui-mcp
+    if [ -f "${pkg_dir}/bin/hermes-web-ui-mcp.mjs" ]; then
+        rm -f "${bin_dir}/hermes-web-ui-mcp"
+        ln -s "${rel}/hermes-web-ui-mcp.mjs" "${bin_dir}/hermes-web-ui-mcp" 2>/dev/null || \
+            cp -a "${pkg_dir}/bin/hermes-web-ui-mcp.mjs" "${bin_dir}/hermes-web-ui-mcp"
+        chmod +x "${bin_dir}/hermes-web-ui-mcp" 2>/dev/null || true
+    fi
+    # hermes-studio-mcp
+    if [ -f "${pkg_dir}/bin/hermes-studio-mcp.mjs" ]; then
+        rm -f "${bin_dir}/hermes-studio-mcp"
+        ln -s "${rel}/hermes-studio-mcp.mjs" "${bin_dir}/hermes-studio-mcp" 2>/dev/null || \
+            cp -a "${pkg_dir}/bin/hermes-studio-mcp.mjs" "${bin_dir}/hermes-studio-mcp"
+        chmod +x "${bin_dir}/hermes-studio-mcp" 2>/dev/null || true
+    fi
+}
+
+NODE_ROOT="$(resolve_node_root)"
+if [ -z "${NODE_ROOT}" ]; then
+    toast_err "未找到应用中心 Node.js v24/v23，请先安装 Node.js 应用或检查 install_dep_apps 声明"
+    exit 1
+fi
+
+NODE_BIN="${NODE_ROOT}/bin/node"
+export PATH="${NODE_ROOT}/bin:/usr/local/bin:/usr/bin:/bin:${PATH}"
+
+log_msg "Node.js runtime: ${NODE_ROOT}"
+log_msg "node: $("${NODE_BIN}" --version 2>/dev/null || echo unknown)"
+
+# ---------------------------------------------------------------------------
+# 2a. 安装前环境检查与清理（v0.6.33-20 新增）
+# ---------------------------------------------------------------------------
+# 根因：很多用户从旧版本升级，或同时装过 hermes-agent，残留 root 进程
+# 占用 8648 端口 / 写入 root 属主文件 / 遗留 IPC socket，导致新实例
+# EACCES 或 EADDRINUSE。参考 fnos-hermes-agent v0.20.39 官方修复。
+preinstall_cleanup() {
+    log_msg ">>> Pre-install environment check & cleanup"
+
+    # 1) Node.js 可用性已在上文确认
+    log_msg "Node.js OK: ${NODE_ROOT}"
+
+    # 2) 检查 8648 端口占用并杀掉（用户明确要求的"端口冲突处理"）
+    local port=8648
+    local port_pids=""
+    if command -v ss >/dev/null 2>&1; then
+        port_pids=$(ss -tlnp 2>/dev/null | awk -v p=":${port}" '$0 ~ p && /pid=/ {
+            for(i=1;i<=NF;i++) if($i ~ /pid=/) { split($i,a,"="); print a[2]; break }
+        }' | sort -u | tr '\n' ' ')
+    elif command -v netstat >/dev/null 2>&1; then
+        port_pids=$(netstat -tlnp 2>/dev/null | awk -v p=":${port}" '$0 ~ p && /\// { split($NF,a,"/"); print a[1] }' | sort -u | tr '\n' ' ')
+    fi
+    if [ -z "${port_pids}" ] && command -v fuser >/dev/null 2>&1; then
+        port_pids=$(fuser "${port}/tcp" 2>/dev/null | tr -d '[:space:]')
+    fi
+    if [ -n "${port_pids}" ]; then
+        log_msg "WARNING: port ${port} already in use by PID ${port_pids}, terminating ..."
+        for pid in ${port_pids}; do
+            kill -TERM "${pid}" 2>/dev/null || true
+        done
+        sleep 2
+        for pid in ${port_pids}; do
+            kill -9 "${pid}" 2>/dev/null || true
+        done
+        log_msg "Port ${port} cleanup done"
+    else
+        log_msg "Port ${port} is free"
+    fi
+
+    # 3) 杀掉 Hermes 相关残留进程（v0.6.38-2 起全部用【本应用专属路径】锚定，
+    #    避免误杀同机其他 Hermes 应用/容器：宽泛关键词 "hermes gateway" 会杀掉
+    #    fnos-hermes-agent 的 gateway，"dist/server/index.js"/"hermes_bridge.py" 会
+    #    杀掉 Docker 版 hermes-webui 容器及其 bridge 进程（254 实测），导致
+    #    "装一个、坏一个"的连锁故障。本应用 web-ui 树都在 NODE_PREFIX/.../hermes-web-ui 下，
+    #    agent 树由 HERMES_AGENT_ROOT/venv/bin/hermes 拉起，两条锚定模式全覆盖。）
+    log_msg "Killing residual Hermes processes (anchored to this app) ..."
+    local _pats=(
+        "${NODE_PREFIX}/lib/node_modules/hermes-web-ui"
+        "${HERMES_AGENT_ROOT}/venv/bin/hermes"
+    )
+    for pat in "${_pats[@]}"; do
+        [ -n "${pat}" ] || continue
+        pkill -TERM -f "${pat}" 2>/dev/null || true
+    done
+    sleep 2
+    for pat in "${_pats[@]}"; do
+        [ -n "${pat}" ] || continue
+        pkill -9 -f "${pat}" 2>/dev/null || true
+    done
+
+    # 4) 清理残留运行时文件（socket / PID / 旧日志）
+    rm -f /tmp/hermes-agent-bridge.sock 2>/dev/null || true
+    rm -f /tmp/hermes-web-ui.sock 2>/dev/null || true
+    rm -f "${HERMES_WEB_UI_HOME}/server.pid" 2>/dev/null || true
+    rm -f "${HERMES_HOME}/server.pid" 2>/dev/null || true
+    if [ -f "${HERMES_WEB_UI_HOME}/server.log" ]; then
+        mv -f "${HERMES_WEB_UI_HOME}/server.log" "${HERMES_WEB_UI_HOME}/server.log.old.$(date +%s)" 2>/dev/null || true
+    fi
+
+    # 5) 修复数据目录属主，防止 root 残留导致 EACCES
+    if [ -n "${TRIM_USERNAME}" ]; then
+        log_msg "Fixing ownership for ${TRIM_USERNAME} before install ..."
+        for d in "${DATA_DIR}" "${HERMES_HOME}" "${HERMES_AGENT_ROOT}" "${TRIM_PKGHOME}" "${TRIM_PKGVAR}"; do
+            [ -d "${d}" ] || continue
+            chown -R "${TRIM_USERNAME}:${TRIM_USERNAME}" "${d}" 2>/dev/null || \
+                log_msg "WARNING: chown ${d} failed (non-fatal)"
+        done
+    fi
+
+    log_msg "Pre-install cleanup done"
+}
+
+preinstall_cleanup
+
+# ---------------------------------------------------------------------------
+# 3. 创建数据目录
+# ---------------------------------------------------------------------------
+log_msg "Creating data directories under ${DATA_DIR} ..."
+if ! mkdir -p "${DATA_DIR}" 2>/dev/null; then
+    toast_err "无法创建数据目录 ${DATA_DIR}，请检查父目录权限"
+    exit 1
+fi
+if ! mkdir -p "${TRIM_PKGVAR}" 2>/dev/null; then
+    toast_err "无法创建日志/变量目录 ${TRIM_PKGVAR}，请检查父目录权限"
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# 4. 安装 / 升级 hermes-web-ui
+# ---------------------------------------------------------------------------
+SKIP_INSTALL=false
+INSTALLED_VER=""
+
+if [ -e "${HERMES_BIN}" ]; then
+    INSTALLED_VER=$("${NODE_BIN}" "${HERMES_BIN}" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+    log_msg "Detected hermes-web-ui ${INSTALLED_VER}, target ${HERMES_STUDIO_VERSION}"
+    if [ "${INSTALLED_VER}" = "${HERMES_STUDIO_VERSION}" ]; then
+        SKIP_INSTALL=true
+        log_msg "Version matches, skipping install"
+    fi
+fi
+
+if [ -e "${BUNDLED_BIN}" ]; then
+    # ── 方式 A：使用 FPK 内 bundled 的 node_modules（推荐，快且稳定） ──
+    # 每次安装都重新复制，确保 package iteration 更新（如 v9 -> v10）能带入
+    # 新增/修改的文件（例如 dist/client 静态资源），避免版本号相同但内容不同
+    # 导致"已安装却缺文件"的问题。
+    log_msg ">>> 使用 bundled node_modules: ${BUNDLED_NODE} -> ${NODE_PREFIX}"
+    rm -rf "${NODE_PREFIX}" 2>/dev/null || true
+    mkdir -p "$(dirname "${NODE_PREFIX}")"
+    if ! cp -a "${BUNDLED_NODE}" "${NODE_PREFIX}"; then
+        toast_err "复制 bundled node_modules 失败"
+        exit 1
+    fi
+    log_msg "bundled node_modules copied (fresh)"
+    # bundled 在 Windows 打包时 symbolic link 会被展平为真实文件，
+    # 而 hermes-web-ui 的 bin 脚本按 __dirname/../package.json 找自身包。
+    # 重建 bin/ 到 lib/node_modules/hermes-web-ui/bin/*.mjs 的符号链接。
+    fix_bundled_bin_links
+    log_msg "bin symlinks reconstructed for hermes-web-ui"
+else
+    # ── 方式 B：回退 npm install（需联网，较慢） ──
+    if [ "${SKIP_INSTALL}" = "true" ]; then
+        log_msg "Using existing hermes-web-ui ${INSTALLED_VER}"
+    else
+        log_msg ">>> 未找到 bundled node_modules，回退 npm install -g hermes-web-ui@${HERMES_STUDIO_VERSION} ..."
+        export npm_config_prefix="${NODE_PREFIX}"
+        export npm_config_cache="${DATA_DIR}/.npm-cache"
+        export npm_config_registry="${npm_config_registry:-https://registry.npmmirror.com}"
+        export npm_config_progress="false"
+        export npm_config_loglevel="info"
+        export npm_config_engine_strict="false"
+
+        NPM_BIN="${NODE_ROOT}/bin/npm"
+        if ! "${NPM_BIN}" install -g --no-audit --no-fund "hermes-web-ui@${HERMES_STUDIO_VERSION}" >>"${LOG_FILE}" 2>&1; then
+            toast_err "hermes-web-ui 安装失败，请查看日志 ${LOG_FILE}"
+            exit 1
+        fi
+    fi
+fi
+
+if [ ! -e "${HERMES_BIN}" ]; then
+    toast_err "hermes-web-ui 安装后未找到可执行文件: ${HERMES_BIN}"
+    exit 1
+fi
+
+ACTUAL_VER=$("${NODE_BIN}" "${HERMES_BIN}" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "unknown")
+log_msg "hermes-web-ui installed version: ${ACTUAL_VER}"
+
+# ---------------------------------------------------------------------------
+# 5. 安装 / 升级 Hermes Agent 后端（hermes-web-ui 启动时依赖 `hermes` 命令）
+# ---------------------------------------------------------------------------
+BUNDLED_AGENT_SRC="${APP_DIR}/hermes-agent-src"
+
+# Hermes Agent 官方 install.sh 需要下载 uv、git clone 仓库并 pip install，
+# 全程在 249 上耗时 3-5 分钟，远超 fnOS install_callback 超时（约 1-2 分钟）。
+# 因此改为"前台准备 + 后台完成"：install_callback 立即返回成功，避免安装被
+# fnOS 中断；cmd/main start 会检测 Agent 是否就绪，必要时等待后台安装完成。
+#
+# 额外问题：很多 NAS 无法稳定连接 GitHub，git clone 会报 GnuTLS recv error，
+# 导致 Agent 一直卡在克隆阶段、应用显示 starting。如果 FPK 内嵌了源码包
+# app/hermes-agent-src，则直接复制到目标目录并跳过网络 clone/fetch。
+ensure_hermes_agent_background() {
+    if [ -x "${HERMES_AGENT_ROOT}/venv/bin/hermes" ]; then
+        log_msg "Hermes Agent already installed at ${HERMES_AGENT_ROOT}"
+        return 0
+    fi
+
+    # 如果之前后台安装标记为失败，清理后重试
+    local bg_marker="${HERMES_HOME}/.install-agent.marker"
+    if [ -f "${bg_marker}" ] && [ "$(cat "${bg_marker}" 2>/dev/null)" = "failed" ]; then
+        log_msg "WARNING: previous background agent install failed, will retry"
+        rm -rf "${HERMES_AGENT_ROOT}" "${bg_marker}"
+    fi
+
+    log_msg ">>> Preparing Hermes Agent backend (will continue in background) ..."
+    log_msg "    AGENT_ROOT=${HERMES_AGENT_ROOT}"
+    log_msg "    HERMES_HOME=${HERMES_HOME}"
+
+    mkdir -p "${HERMES_HOME}" "${HERMES_AGENT_ROOT}"
+
+    # 关键：预先设置目录属主。后续 install.sh 在目录内创建的文件会继承该属主，
+    # 避免后台安装完成后 hermes-home/hermes-agent 属主错误（如 veenyi 而非
+    # hermes-studio），导致 hermes-web-ui 运行时 EACCES。
+    # install_callback 在 fnOS 中可能以普通用户运行，chown 失败不致命，
+    # cmd/main start 会再次以 root 身份修复。
+    if [ -n "${TRIM_USERNAME}" ]; then
+        chown -R "${TRIM_USERNAME}:${TRIM_USERNAME}" "${HERMES_HOME}" "${HERMES_AGENT_ROOT}" 2>/dev/null || \
+            log_msg "WARNING: pre-chown hermes-home/agent to ${TRIM_USERNAME} failed (will retry in cmd/main)"
+    fi
+
+    # 优先使用 FPK 内嵌的 install.sh，避免 curl 下载失败
+    BUNDLED_INSTALLER="${APP_DIR}/config/bootstrap/hermes-agent-install.sh"
+    INSTALLER="/tmp/hermes-agent-install.sh"
+    if [ -s "${BUNDLED_INSTALLER}" ]; then
+        cp -a "${BUNDLED_INSTALLER}" "${INSTALLER}"
+        log_msg "Using bundled Hermes Agent installer"
+    else
+        # v0.6.38-2: 下载失败不再静默——多轮重试 + 多源；全失败则明确记录，
+        # cmd/main 的 agent-ready watchdog 会在后续尝试重新准备。
+        log_msg "WARNING: bundled installer missing, downloading (5 attempts) ..."
+        local _ok=0
+        for attempt in 1 2 3 4 5; do
+            if curl -fsSL --connect-timeout 20 --max-time 120 "https://hermes-agent.nousresearch.com/install.sh" -o "${INSTALLER}" 2>/dev/null; then
+                _ok=1
+                break
+            fi
+            log_msg "installer download attempt ${attempt}/5 failed, retrying..."
+            sleep 5
+        done
+        if [ "${_ok}" = "1" ]; then
+            log_msg "Hermes Agent installer downloaded"
+        else
+            log_msg "WARNING: 无法准备 Hermes Agent 安装脚本（网络异常），将在首次启动时重试"
+        fi
+    fi
+
+    if [ ! -s "${INSTALLER}" ]; then
+        log_msg "WARNING: 无法准备 Hermes Agent 安装脚本，将在首次启动时重试"
+        return 0
+    fi
+
+    # 检测是否有内嵌的离线源码包
+    OFFLINE_SRC_FLAG="0"
+    if [ -d "${BUNDLED_AGENT_SRC}/.git" ] || [ -f "${BUNDLED_AGENT_SRC}/pyproject.toml" ]; then
+        log_msg "Bundled Hermes Agent source found at ${BUNDLED_AGENT_SRC}"
+        OFFLINE_SRC_FLAG="1"
+    else
+        log_msg "No bundled Hermes Agent source, will clone from GitHub"
+    fi
+
+    # 生成后台安装脚本。使用双引号 here-doc，让路径在生成时展开并硬编码到
+    # 脚本中，避免 nohup 启动时环境变量丢失。
+    BG_SCRIPT="${HERMES_HOME}/.install-agent.sh"
+    BG_LOG="${HERMES_HOME}/install-agent.log"
+    BG_PID_FILE="${HERMES_HOME}/.install-agent.pid"
+    BG_MARKER="${HERMES_HOME}/.install-agent.marker"
+
+    rm -f "${BG_MARKER}" "${BG_PID_FILE}"
+
+    cat > "${BG_SCRIPT}" <<AGENT_EOF
+#!/bin/bash
+# 注意：本脚本在后台运行，不 set -e，避免某一步非致命失败导致整个安装退出。
+# 所有关键步骤显式检查，失败时写 marker=failed。
+AGENT_ROOT="${HERMES_AGENT_ROOT}"
+HERMES_HOME="${HERMES_HOME}"
+INSTALLER="/tmp/hermes-agent-install.sh"
+BUNDLED_AGENT_SRC="${BUNDLED_AGENT_SRC}"
+APP_DIR="${APP_DIR}"
+OFFLINE_SRC_FLAG="${OFFLINE_SRC_FLAG}"
+LOG_FILE="${HERMES_HOME}/install-agent.log"
+MARKER="${HERMES_HOME}/.install-agent.marker"
+PID_FILE="${HERMES_HOME}/.install-agent.pid"
+APP_USER="${TRIM_USERNAME:-hermes-studio}"
+
+fail() {
+    echo "ERROR: \$1" | tee -a "\${LOG_FILE}" >&2
+    echo "failed" > "\${MARKER}"
+    rm -f "\${PID_FILE}"
+    exit 1
+}
+
+rm -f "\${MARKER}"
+{
+    echo "=== Hermes Agent background install started at \$(date '+%Y-%m-%d %H:%M:%S') ==="
+    echo "AGENT_ROOT=\${AGENT_ROOT}"
+    echo "HERMES_HOME=\${HERMES_HOME}"
+    echo "OFFLINE_SRC_FLAG=\${OFFLINE_SRC_FLAG}"
+
+    if [ ! -s "\${INSTALLER}" ]; then
+        fail "installer not found at \${INSTALLER}"
+    fi
+
+    export HOME="\${HERMES_HOME}"
+    export HERMES_HOME="\${HERMES_HOME}"
+    export HERMES_INSTALL_DIR="\${AGENT_ROOT}"
+    export UV_NO_CONFIG=1
+
+    # v0.6.38-2: 国内网络加速——PyPI 依赖走镜像，避免慢网/断网导致安装失败。
+    # uv 优先用 UV_DEFAULT_INDEX；同时兜底 UV_INDEX_URL 与 PIP_INDEX_URL。
+    # （用户可在 ~/.hermes/.env 或系统环境覆盖为其他镜像）
+    if [ -z "\${UV_DEFAULT_INDEX}" ] && [ -z "\${UV_INDEX_URL}" ]; then
+        export UV_DEFAULT_INDEX="https://pypi.tuna.tsinghua.edu.cn/simple"
+    fi
+    if [ -z "\${PIP_INDEX_URL}" ]; then
+        export PIP_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple"
+    fi
+    # uv 下载 Python / astral 安装器超时放宽，慢网下避免秒失败
+    export UV_HTTP_TIMEOUT="\${UV_HTTP_TIMEOUT:-300}"
+    export UV_CONCURRENT_DOWNLOADS="\${UV_CONCURRENT_DOWNLOADS:-8}"
+
+    # 0) 后台安装前同样做一次残留进程/端口/属主清理（锚定本应用路径，不误杀
+    #    Docker 容器 / 其他 Hermes 应用——见 preinstall_cleanup 注释）
+    echo ">>> Background installer: cleaning residual processes & permissions ..."
+    local _bg_pats=(
+        "\${AGENT_ROOT}/venv/bin/hermes"
+        "\${HERMES_HOME}/../data/node/lib/node_modules/hermes-web-ui"
+    )
+    for pat in "\${_bg_pats[@]}"; do
+        pkill -TERM -f "\${pat}" 2>/dev/null || true
+    done
+    sleep 1
+    for pat in "\${_bg_pats[@]}"; do
+        pkill -9 -f "\${pat}" 2>/dev/null || true
+    done
+    rm -f /tmp/hermes-agent-bridge.sock /tmp/hermes-web-ui.sock 2>/dev/null || true
+    if command -v chown >/dev/null 2>&1 && id "\${APP_USER}" >/dev/null 2>&1; then
+        mkdir -p "\$(dirname "\${AGENT_ROOT}")" "\${HERMES_HOME}"
+        chown -R "\${APP_USER}:\${APP_USER}" "\$(dirname "\${AGENT_ROOT}")" "\${HERMES_HOME}" 2>/dev/null || \
+            echo "WARNING: background chown failed (non-fatal)" >&2
+    fi
+
+    # 1) 确保目标目录可写。install.sh 不允许目标目录已存在且非 git 仓库，先清理。
+    # 注意：如果目录由 root 拥有，当前用户可能删不掉，这里尝试并记录。
+    if [ -d "\${AGENT_ROOT}" ]; then
+        rm -rf "\${AGENT_ROOT}" 2>/dev/null || { echo "WARNING: cannot remove old \${AGENT_ROOT}, trying chown ..."; chown -R "\${APP_USER}:\${APP_USER}" "\${AGENT_ROOT}" 2>/dev/null || true; rm -rf "\${AGENT_ROOT}" 2>/dev/null || true; }
+    fi
+
+    # 2) 如果 FPK 内嵌了源码包，直接复制过去并标记离线安装，跳过 git clone
+    if [ "\${OFFLINE_SRC_FLAG}" = "1" ] && [ -d "\${BUNDLED_AGENT_SRC}" ]; then
+        echo ">>> Using bundled Hermes Agent source (offline), copying to \${AGENT_ROOT} ..."
+        mkdir -p "\$(dirname "\${AGENT_ROOT}")"
+        if ! cp -a "\${BUNDLED_AGENT_SRC}" "\${AGENT_ROOT}"; then
+            fail "failed to copy bundled source to \${AGENT_ROOT}"
+        fi
+        # 确保它是一个可识别的 git 仓库（install.sh 的离线模式会检查 .git）
+        if [ ! -d "\${AGENT_ROOT}/.git" ]; then
+            echo "Initializing git repo in bundled source ..."
+            cd "\${AGENT_ROOT}" || fail "cannot cd to \${AGENT_ROOT}"
+            git init -q || fail "git init failed"
+            git config user.email "fnos@local"
+            git config user.name "fnOS Installer"
+            git add -A
+            git commit -q -m "offline bundle" || fail "git commit failed"
+            git remote add origin "https://github.com/NousResearch/hermes-agent.git" 2>/dev/null || true
+        fi
+        export HERMES_OFFLINE_INSTALL=1
+        echo "Bundled source ready, HERMES_OFFLINE_INSTALL=1"
+    fi
+
+    # 2b) 若 FPK 内嵌 agent 的 node_modules（browser tools + TUI），直接复制并跳过
+    #     后台 npm install。官方 installer 默认 NODE_DEPS_TIMEOUT=600s，NAS 慢网会卡
+    #     很久；node_modules 已离线装好，复制后把超时压到 1s 让 npm 步骤直接跳过。
+    #     仅在使用 bundled 源码（OFFLINE_SRC_FLAG=1）时做，保证路径布局一致。
+    if [ "${OFFLINE_SRC_FLAG}" = "1" ] && [ -d "${APP_DIR}/hermes-agent-node/node_modules" ]; then
+        echo ">>> Bundled agent node_modules found, copying to skip npm install ..."
+        while IFS= read -r nm; do
+            rel="${nm#${APP_DIR}/hermes-agent-node/}"
+            mkdir -p "${AGENT_ROOT}/${rel}"
+            cp -a "${nm}/." "${AGENT_ROOT}/${rel}/" 2>/dev/null || \
+                echo "WARNING: copy ${rel} failed (non-fatal)" >&2
+        done < <(find "${APP_DIR}/hermes-agent-node" -name node_modules -type d)
+        export NODE_DEPS_TIMEOUT=1
+        echo "Bundled agent node_modules copied; NODE_DEPS_TIMEOUT=1 (npm install skipped)"
+    else
+        echo "No bundled agent node_modules in FPK; will run npm install (needs network)"
+    fi
+
+    # 3) 运行官方 install.sh
+    echo ">>> Running Hermes Agent installer ..."
+    if ! bash "\${INSTALLER}" --non-interactive --skip-setup \\
+            --dir "\${AGENT_ROOT}" \\
+            --hermes-home "\${HERMES_HOME}"; then
+        fail "Hermes Agent installer exited with \$?"
+    fi
+
+    # 4) 校验 hermes 命令
+    if [ ! -x "\${AGENT_ROOT}/venv/bin/hermes" ]; then
+        fail "hermes command not found after install"
+    fi
+
+    # 5) 确保应用用户能读写 Agent 与 HOME 目录（后台脚本可能以 root 运行）
+    echo ">>> Fixing permissions ..."
+    chown -R "\${APP_USER}:\${APP_USER}" "\${AGENT_ROOT}" "\${HERMES_HOME}" 2>/dev/null || \
+        echo "WARNING: final chown failed (non-fatal)" >&2
+    chmod -R 755 "\${AGENT_ROOT}" 2>/dev/null || \
+        echo "WARNING: chmod agent failed (non-fatal)" >&2
+    chmod -R u+rwX "\${HERMES_HOME}" 2>/dev/null || \
+        echo "WARNING: chmod hermes-home failed (non-fatal)" >&2
+
+    echo "=== Hermes Agent background install finished at \$(date '+%Y-%m-%d %H:%M:%S') ==="
+} >> "\${LOG_FILE}" 2>&1
+
+echo "success" > "\${MARKER}"
+rm -f "\${PID_FILE}"
+AGENT_EOF
+
+    chmod +x "${BG_SCRIPT}" 2>/dev/null || true
+
+    # 如果后台安装已在运行，避免重复启动
+    if [ -f "${BG_PID_FILE}" ]; then
+        local old_pid
+        old_pid=$(cat "${BG_PID_FILE}" 2>/dev/null)
+        if kill -0 "${old_pid}" 2>/dev/null; then
+            log_msg "Hermes Agent background install already running (PID ${old_pid})"
+            return 0
+        fi
+    fi
+
+    log_msg "Starting Hermes Agent background installer"
+    nohup "${BG_SCRIPT}" >> "${BG_LOG}" 2>&1 &
+    echo $! > "${BG_PID_FILE}"
+    log_msg "Hermes Agent background installer PID=$(cat "${BG_PID_FILE}")"
+
+    # 短暂等待，如果安装极快（已缓存）则立即确认
+    local _w=0
+    while [ ${_w} -lt 30 ]; do
+        if [ -x "${HERMES_AGENT_ROOT}/venv/bin/hermes" ]; then
+            log_msg "Hermes Agent installed immediately (cached)"
+            return 0
+        fi
+        sleep 1
+        _w=$((_w + 1))
+    done
+
+    log_msg "Hermes Agent installation continuing in background; first start may take a few minutes"
+    return 0
+}
+
+ensure_hermes_agent_background
+
+# ---------------------------------------------------------------------------
+# 5b. （已移除）旧版会在此把内置的 trim-cli Skill（v1）复制到
+#     ${HERMES_HOME}/skills/trim-cli。该目录位于用户技能库内，安装/升级时
+#     无条件 rm -rf + cp 会【直接覆盖用户自己的同名技能】，把用户已更新到
+#     v2 的技能打回旧的 v1，属于破坏性行为。
+#     现改为不内置、不注入任何技能：技能由用户自行安装与管理。
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# 6. 修复权限（全部容错，不再因权限命令失败而退出安装）
+# ---------------------------------------------------------------------------
+# 注意：Hermes Agent 可能仍在后台安装。这里先对已经存在的文件执行 chown，
+# 后台脚本自己也会再 chown 一次；cmd/main start 还会做最终修复。
+if [ -n "${TRIM_USERNAME}" ]; then
+    log_msg "Fixing permissions for ${TRIM_USERNAME} (best-effort) ..."
+    for d in "${DATA_DIR}" "${HERMES_HOME}" "${HERMES_AGENT_ROOT}"; do
+        [ -d "${d}" ] || continue
+        chown -R "${TRIM_USERNAME}:${TRIM_USERNAME}" "${d}" 2>/dev/null || \
+            log_msg "WARNING: chown ${d} failed (non-fatal)"
+    done
+    # 确保 HERMES_HOME 对应用用户可写（Agent config/skills 注入需要）
+    if [ -d "${HERMES_HOME}" ]; then
+        chmod -R u+rwX "${HERMES_HOME}" 2>/dev/null || \
+            log_msg "WARNING: chmod hermes-home failed (non-fatal)"
+    fi
+    # 确保 Agent 目录对所有用户可执行，避免非 root 环境下 [ -x ] 检测失败
+    if [ -d "${HERMES_AGENT_ROOT}" ]; then
+        chmod -R 755 "${HERMES_AGENT_ROOT}" 2>/dev/null || \
+            log_msg "WARNING: chmod hermes-agent failed (non-fatal)"
+    fi
+    chmod -R 750 "${DATA_DIR}" 2>/dev/null || \
+        log_msg "WARNING: chmod data failed (non-fatal)"
+        # ⛔ DSH 凭据 owner-only 保护：上面的 chmod -R 会把 data/.dsh/.credentials.yaml
+        # 递归放宽，而 DSH 对该文件做 owner-only 硬校验，权限变宽则整个 plugin tree
+        # 加载失败 —— 表现为 WebUI「DSH 模式」下拉框无限转圈。这里无条件纠回 600（幂等）。
+    chmod 600 "${DATA_DIR}/.dsh/.credentials.yaml" 2>/dev/null || true
+else
+    log_msg "TRIM_USERNAME empty, skip permission fix"
+fi
+
+# ---------------------------------------------------------------------------
+# 6b. 配置微信渠道 DM 策略（依据安装向导的安全确认开关）
+# ---------------------------------------------------------------------------
+# 默认 hermes-web-ui 的微信 DM 策略为 allowlist（白名单），非白名单用户会
+# 收到 "Unauthorized user: ... on weixin" 警告且消息被拒绝。
+# 如果用户在 wizard 中勾选"允许所有微信用户发送消息"，则写入
+# WEIXIN_DM_POLICY=open + WEIXIN_ALLOW_ALL_USERS=true 到 ~/.hermes/.env。
+configure_weixin_policy() {
+    local hermes_env="${DATA_DIR}/.hermes/.env"
+
+    is_truthy() {
+        case "${1:-}" in
+            [Tt]rue|[Yy]es|[Oo]n|1) return 0 ;;
+            *) return 1 ;;
+        esac
+    }
+
+    if is_truthy "${WEIXIN_OPEN_ALL_USERS}"; then
+        log_msg "WEIXIN_OPEN_ALL_USERS enabled -> writing open DM policy to ${hermes_env}"
+        mkdir -p "$(dirname "${hermes_env}")"
+        [ -f "${hermes_env}" ] || touch "${hermes_env}"
+
+        # 安全注释头（幂等，只有不存在才添加）
+        if ! grep -qF "# Weixin DM policy configured by fnOS installer" "${hermes_env}" 2>/dev/null; then
+            cat >> "${hermes_env}" <<'ENV_EOF'
+
+# Weixin DM policy configured by fnOS installer
+# WARNING: open policy allows ANY weixin user to message this bot.
+ENV_EOF
+        fi
+
+        # 更新或追加两条关键配置
+        for kv in 'WEIXIN_DM_POLICY=open' 'WEIXIN_ALLOW_ALL_USERS=true'; do
+            local key="${kv%%=*}"
+            if grep -qE "^[[:space:]]*${key}=" "${hermes_env}" 2>/dev/null; then
+                sed -i -E "s|^[[:space:]]*${key}=.*|${kv}|" "${hermes_env}" 2>/dev/null || \
+                    log_msg "WARNING: failed to update ${key} in ${hermes_env}"
+            else
+                echo "${kv}" >> "${hermes_env}" 2>/dev/null || \
+                    log_msg "WARNING: failed to append ${kv} to ${hermes_env}"
+            fi
+        done
+
+        if [ -n "${TRIM_USERNAME}" ]; then
+            chown -R "${TRIM_USERNAME}:${TRIM_USERNAME}" "$(dirname "${hermes_env}")" 2>/dev/null || \
+                log_msg "WARNING: chown $(dirname "${hermes_env}") failed (non-fatal)"
+        fi
+        chmod 600 "${hermes_env}" 2>/dev/null || true
+        log_msg "Weixin DM policy set to OPEN (all users allowed)"
+    else
+        log_msg "WEIXIN_OPEN_ALL_USERS not set or false -> keeping default allowlist DM policy"
+    fi
+}
+
+configure_weixin_policy
+
+# ---------------------------------------------------------------------------
+# 6. 双保险：修正外层生命周期 cmd/main 的 HERMES_BIN 路径
+# ---------------------------------------------------------------------------
+# fnOS 在升级安装时偶尔不会覆盖 /var/apps/hermes-studio/cmd/main。
+# 旧 cmd/main 调用 data/node/bin/hermes-web-ui（Windows 打包后被展平
+# 的真实文件），会按 ../package.json 找不到包根目录而启动失败。
+# 这里强制把 cmd/main 中的 HERMES_BIN 改为真实 mjs 入口。
+#
+# v0.6.38-2 说明：新版 cmd/main 已内置 TRIM_* 动态解析（优先 /var/apps/hermes-studio
+# symlink，且校验目录存在性，不再 hardcode /vol1），因此不再对 cmd/main 做
+# TRIM_* sed 替换——旧实现曾因 upgrade 流程中 /var/apps 文件在回调后才被覆盖、
+# 或 sed 匹配失败，导致 /vol1 默认值残留（254 实测）。此处仅保留 HERMES_BIN
+# 修复（兼容旧版 cmd/main 残留），TRIM 路径交给 cmd/main 自解析。
+fix_main_script() {
+    local main_script expected_bin
+    main_script="/var/apps/hermes-studio/cmd/main"
+    expected_bin="${NODE_PREFIX}/lib/node_modules/hermes-web-ui/bin/hermes-web-ui.mjs"
+
+    [ -f "${main_script}" ] || return 0
+
+    # cmd/main 可能已经把 HERMES_BIN 写成绝对路径，也可能保留变量形式。
+    # 变量形式在运行时根据 TRIM_PKGHOME 展开，只要指向真实 mjs 入口即正确。
+    if grep -qF "HERMES_BIN=\"${expected_bin}\"" "${main_script}" 2>/dev/null \
+       || grep -qF 'HERMES_BIN="${NODE_PREFIX}/lib/node_modules/hermes-web-ui/bin/hermes-web-ui.mjs"' "${main_script}" 2>/dev/null; then
+        log_msg "cmd/main HERMES_BIN already correct, skip patch"
+    else
+        # 替换 HERMES_BIN 赋值行（支持双引号、无引号、单引号）
+        sed -i -E "s|^(HERMES_BIN[[:space:]]*=[[:space:]]*['\"]?)[^'\"]+(['\"]?)|\1${expected_bin}\2|" "${main_script}" 2>/dev/null || true
+        if grep -qF "HERMES_BIN=\"${expected_bin}\"" "${main_script}" 2>/dev/null; then
+            log_msg "cmd/main HERMES_BIN patched to ${expected_bin}"
+        else
+            log_msg "WARNING: failed to patch cmd/main HERMES_BIN"
+        fi
+    fi
+
+    # 同时替换 TRIM_* 兜底路径中的 /vol1，避免状态检测找错卷。
+    # ⛔ 必须先判非空：fnOS 偶尔不传 TRIM_APPDEST，空值注入 sed 会把
+    #    /vol2/@appcenter/hermes-studio/bin/x 替换成 /bin/x，直接写坏
+    #    正在使用的 cmd/main（已实证）。空值时整体跳过。
+    if [ -n "${TRIM_APPDEST}" ] && [ -n "${TRIM_PKGHOME}" ] && [ -n "${TRIM_PKGVAR}" ]; then
+        sed -i -E "s|/vol[0-9]+/@appcenter/hermes-studio|${TRIM_APPDEST}|g" "${main_script}" 2>/dev/null || true
+        sed -i -E "s|/vol[0-9]+/@apphome/hermes-studio|${TRIM_PKGHOME}|g" "${main_script}" 2>/dev/null || true
+        sed -i -E "s|/vol[0-9]+/@appdata/hermes-studio|${TRIM_PKGVAR}|g" "${main_script}" 2>/dev/null || true
+        log_msg "cmd/main TRIM fallback paths rewritten to resolved volumes"
+    else
+        log_msg "WARNING: TRIM_* incomplete (APPDEST='${TRIM_APPDEST}' PKGHOME='${TRIM_PKGHOME}' PKGVAR='${TRIM_PKGVAR}'), skipping cmd/main sed rewrite"
+    fi
+
+    log_msg "cmd/main HERMES_BIN check done (TRIM paths are self-resolved by new cmd/main)"
+}
+fix_main_script
+
+trap - ERR
+log_msg "install_callback finished successfully."
+exit 0

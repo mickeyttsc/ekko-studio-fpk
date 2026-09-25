@@ -1,0 +1,103 @@
+#!/bin/bash
+
+### 安装前回调 — 清理残留进程与 PID 文件，避免安装时权限设置失败
+
+# install_init 在 fnOS 调用时，数据目录（@appdata）可能尚未挂载或创建。
+# 优先只写应用自己的日志文件；/var/log/apps 在部分系统上可能不可写，会导致
+# fnOS 把日志写入失败误判为安装失败。/tmp 作为最后兜底。
+LOG_FILE="${TRIM_PKGVAR:-/tmp/hermes-studio-var}/info.log"
+TMP_LOG_FILE="/tmp/hermes-studio-install-init.log"
+
+# ── TRIM_* 自解析（不 hardcode 卷号）────────────────────────────────────────
+# fnOS 偶尔不传 TRIM_*，写死 /vol1 会让日志/状态检测落到不存在的卷，
+# 升级失败时零诊断信息。统一从 /var/apps/hermes-studio symlink 反推。
+_resolve_trim_paths() {
+    local app_link="/var/apps/hermes-studio"
+    if { [ -z "${TRIM_APPDEST}" ] || [ ! -d "${TRIM_APPDEST}" ]; } && [ -e "${app_link}" ]; then
+        TRIM_APPDEST="$(readlink -f "${app_link}" 2>/dev/null)"
+    fi
+    if { [ -z "${TRIM_PKGHOME}" ] || [ ! -d "${TRIM_PKGHOME}" ]; } && [ -L "${app_link}/home" ]; then
+        TRIM_PKGHOME="$(readlink -f "${app_link}/home" 2>/dev/null)"
+    fi
+    if { [ -z "${TRIM_PKGVAR}" ] || [ ! -d "${TRIM_PKGVAR}" ]; } && [ -L "${app_link}/var" ]; then
+        TRIM_PKGVAR="$(readlink -f "${app_link}/var" 2>/dev/null)"
+    fi
+    if [ -z "${TRIM_PKGHOME}" ] && [ -n "${TRIM_APPDEST}" ]; then
+        local _ph; _ph="$(echo "${TRIM_APPDEST}" | sed 's|/@appcenter/|/@apphome/|')"
+        [ -d "${_ph}" ] && TRIM_PKGHOME="${_ph}"
+    fi
+    if [ -z "${TRIM_PKGVAR}" ] && [ -n "${TRIM_APPDEST}" ]; then
+        local _pv; _pv="$(echo "${TRIM_APPDEST}" | sed 's|/@appcenter/|/@appdata/|')"
+        [ -d "${_pv}" ] && TRIM_PKGVAR="${_pv}"
+    fi
+}
+_resolve_trim_paths
+
+
+# 必须先创建日志目录，否则 >> 重定向会报 "No such file or directory"
+mkdir -p "$(dirname "${LOG_FILE}")" "${TRIM_PKGHOME}" "${TRIM_APPDEST}" 2>/dev/null || true
+
+log_msg() {
+    local msg="$(date '+%Y-%m-%d %H:%M:%S') - [install_init] $1"
+    # 优先写入应用日志；失败则写入 /tmp；再失败则丢弃，绝不因日志写入失败退出
+    echo "$msg" >> "${LOG_FILE}" 2>/dev/null || \
+    echo "$msg" >> "${TMP_LOG_FILE}" 2>/dev/null || \
+    true
+}
+
+log_msg "=== install_init start ==="
+log_msg "TRIM_APPDEST=${TRIM_APPDEST}"
+log_msg "TRIM_PKGHOME=${TRIM_PKGHOME}"
+
+# 强制清理残留进程（包括 web-ui 主进程、gateway、bridge、MCP 子进程、watchdog）
+
+# ── 残留进程清理：只用本应用专属路径锚定 ────────────────────────────────────
+# ⛔ 绝不使用 "bin/hermes-web-ui" / "dist/server/index.js" / "hermes gateway" /
+#    "hermes_bridge" 这类宽泛关键词 —— Docker 版官方容器命令行含相同字样，
+#    宽泛 pkill 会把别人的容器一起杀掉，导致"装一个、坏一个"的连锁故障。
+#    本应用 web-ui 树（含 dist/server/index.js、bridge、MCP、watchdog）全部
+#    位于 ${DATA_DIR}/node/lib/node_modules/hermes-web-ui 下，一条锚定模式即
+#    可全覆盖；agent 树由 ${TRIM_PKGHOME}/hermes-agent/venv/bin/hermes 拉起。
+clean_app_processes() {
+    local _pats=(
+        "${TRIM_PKGHOME}/data/node/lib/node_modules/hermes-web-ui"
+        "${TRIM_PKGHOME}/hermes-agent/venv/bin/hermes"
+    )
+    local pat
+    for pat in "${_pats[@]}"; do
+        [ -n "${pat}" ] || continue
+        pkill -TERM -f "${pat}" 2>/dev/null || true
+    done
+    local _w=0
+    while [ ${_w} -lt 10 ]; do
+        local _alive=0
+        for pat in "${_pats[@]}"; do
+            [ -n "${pat}" ] || continue
+            pgrep -f "${pat}" >/dev/null 2>&1 && _alive=1
+        done
+        [ "${_alive}" = "0" ] && break
+        sleep 1
+        _w=$((_w + 1))
+    done
+    for pat in "${_pats[@]}"; do
+        [ -n "${pat}" ] || continue
+        pkill -9 -f "${pat}" 2>/dev/null || true
+    done
+}
+clean_app_processes
+
+
+# 删除残留 PID 文件与 IPC socket，避免旧日志误导启动检测
+rm -f "${TRIM_PKGHOME}/data/server.pid" 2>/dev/null || true
+rm -f /tmp/hermes-agent-bridge.sock 2>/dev/null || true
+rm -f /tmp/hermes-web-ui.sock 2>/dev/null || true
+if [ -f "${TRIM_PKGHOME}/data/server.log" ]; then
+    mv -f "${TRIM_PKGHOME}/data/server.log" "${TRIM_PKGHOME}/data/server.log.old.$(date +%s)" 2>/dev/null || \
+        rm -f "${TRIM_PKGHOME}/data/server.log" 2>/dev/null || true
+fi
+
+# 额外等待 2 秒，确保文件系统释放所有句柄
+sleep 2
+
+log_msg "=== install_init end ==="
+exit 0

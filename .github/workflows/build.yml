@@ -1,0 +1,495 @@
+name: Build fnOS Ekko Studio FPK
+
+# 每次 push 到 main / 手动触发 / 上游巡检 bump 后自动构建 FPK 并发布。
+#
+# ⚠️ 发布职责归属：本 workflow 是 Release 的【唯一】归属方。
+#    auto-update.yml 只做检测 + bump + 提交，不建 Release、不传资产。
+#    历史上两处都写「建 Release」，且构建侧的发布步骤被
+#    `if: startsWith(github.ref, 'refs/tags/')` 保护 —— 而 workflow_dispatch
+#    与 workflow_run 的 github.ref 是 refs/heads/main，该条件为假，发布步骤被
+#    【静默跳过】：run 全绿、artifact 也在，但仓库里永远没有 Release，
+#    下游再拿 releases/tags/<tag> 得到 null → 上传打 404 → 整条链路红。
+#    本文件的发布步骤一律【不带 ref 门禁】，三条触发路径都能正常发布。
+#
+# 触发路径：
+#   1. push main —— PAT/OAuth 推送（会触发 push 事件）
+#   2. workflow_dispatch —— 手动触发（可覆盖版本号）
+#   3. workflow_run —— auto-update.yml 完成后接力。
+#      必需：auto-update 用 GITHUB_TOKEN 推送【不会】触发 push 事件
+#      （GitHub 防递归策略），只能靠 workflow_run 接力，这段配对了才叫「自动出包」。
+#
+# 构建方式：把 hermes-web-ui 的 node_modules（含编译好的原生 node-pty）作为
+# app/node 打进包（scripts/build-fpk.sh 的 ensure_node_bundle）。安装时
+# install_callback 走离线复制，几秒完成，不再依赖 fnOS 联网编译（fnOS 缺 gcc）。
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（格式：0.7.24-6；留空则使用 manifest 中的版本）'
+        required: false
+        default: ''
+  workflow_run:
+    workflows: ["Auto-update upstream versions"]
+    types: [completed]
+
+permissions:
+  contents: write
+
+env:
+  APP_NAME: "hermes-studio"
+  MANIFEST_FILE: "manifest"
+
+jobs:
+  build-fpk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── 硬门禁 1：开发者(maintainer) 必须始终是上游 EKKOLearnAI；
+      #              打包者(distributor) 必须是本 fork 作者 Mickey。
+      # 历史事故：main 被 force-reset 到上游基线时 distributor 被上游的
+      # veenyi 覆盖，产物在应用中心显示上游为打包者。
+      # 注意 maintainer 是「开发者」字段，不得改成自己。
+      # 前移到第一步，避免构建 8 分钟后才失败。
+      - name: Verify manifest packager identity
+        run: |
+          set -euo pipefail
+          get() { grep "^$1[[:space:]]*=" manifest | head -1 | sed 's/.*=[[:space:]]*//' | tr -d '"' | tr -d ' '; }
+          M="$(get maintainer)";  MU="$(get maintainer_url)"
+          D="$(get distributor)"; DU="$(get distributor_url)"
+          echo "manifest: 开发者(maintainer)=$M  打包者(distributor)=$D"
+          if [ "$M" != "EKKOLearnAI" ]; then
+            echo "::error:: maintainer(开发者) 应为上游 EKKOLearnAI，实际=$M —— 开发者字段不得改动"
+            exit 1
+          fi
+          if [ "$D" != "Mickey" ]; then
+            echo "::error:: distributor(打包者) 应为 Mickey，实际=$D —— 疑似被上游覆盖，构建中止"
+            exit 1
+          fi
+          case "$DU" in
+            *mickeyttsc/*) ;;
+            *) echo "::error:: distributor_url 未指向本 fork: $DU"; exit 1 ;;
+          esac
+          case "$MU" in
+            *EKKOLearnAI/*) ;;
+            *) echo "::error:: maintainer_url 未指向上游开发者: $MU"; exit 1 ;;
+          esac
+          echo "✅ 开发者=$M（上游）  打包者=$D（本 fork）"
+
+      # ── 硬门禁 2：manifest 字段完整性
+      #   manifest 无重复字段；必需字段齐全（maintainer_url 等容易在手工编辑/
+      #   工具 patch 时丢失）。
+      - name: Verify manifest fields
+        run: |
+          set -euo pipefail
+          DUP="$(awk -F= '/^[a-z_]+[[:space:]]*=/{gsub(/[[:space:]]/,"",$1); print $1}' manifest | sort | uniq -d)"
+          if [ -n "$DUP" ]; then
+            echo "::error:: manifest 存在重复字段: $DUP"
+            exit 1
+          fi
+          for f in appname version display_name platform source maintainer maintainer_url \
+                   distributor distributor_url desktop_uidir desktop_applaunchname; do
+            grep -qE "^${f}[[:space:]]*=" manifest || { echo "::error:: manifest 缺必需字段: $f"; exit 1; }
+          done
+          echo "✅ manifest 字段完整且无重复"
+
+      - name: Set timezone
+        run: sudo timedatectl set-timezone "Asia/Shanghai"
+
+      - name: Get version from manifest
+        id: version
+        run: |
+          VERSION=$(grep "^version" ${{ env.MANIFEST_FILE }} | awk -F'=' '{print $2}' | tr -d ' ')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "从 manifest 读取的版本号：v$VERSION"
+
+      - name: Determine target version
+        id: target_version
+        run: |
+          set -euo pipefail
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            TARGET_VERSION="${{ github.event.inputs.version }}"
+            echo "使用输入的版本号：v$TARGET_VERSION"
+          else
+            TARGET_VERSION="${{ steps.version.outputs.version }}"
+            echo "使用 manifest 版本号：v$TARGET_VERSION"
+          fi
+          # 版本号必须带构建号（形如 0.7.24-6）：fnOS 应用中心按文件名识别版本，
+          # 无版本号的 fpk 永远装不上（报错或静默不处理）。
+          if ! printf '%s' "$TARGET_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$'; then
+            echo "::error:: 版本号 '$TARGET_VERSION' 格式非法，应形如 0.7.24-6（不得用 latest 等无版本号值）"
+            exit 1
+          fi
+          echo "target_version=$TARGET_VERSION" >> $GITHUB_OUTPUT
+
+      # fnpack 为飞牛官方打包工具。CI 网络可能无法访问其 CDN，因此设为「可选」：
+      # 下载/校验失败时不阻断，build-fpk.sh 会自动回退到纯 tar+gzip 构建。
+      - name: Install fnpack (optional; falls back to tar+gzip)
+        continue-on-error: true
+        run: |
+          set +e
+          URL="https://static2.fnnas.com/fnpack/fnpack-1.2.1-linux-amd64"
+          for i in 1 2 3; do
+            echo "尝试下载 fnpack ($i/3)..."
+            if curl -fsSL "$URL" -o fnpack \
+               && chmod +x fnpack \
+               && mv fnpack /usr/local/bin/ \
+               && command -v fnpack >/dev/null; then
+              echo "fnpack 就绪"
+              exit 0
+            fi
+            rm -f fnpack
+            sleep 3
+          done
+          echo "::warning:: fnpack 不可用，将使用纯 tar+gzip 兜底构建"
+
+      - name: Create dist directory
+        run: mkdir -p dist
+
+      # bundled node（含原生 node-pty）必须在与 fnOS 运行时相同 ABI 的环境下编译，
+      # 否则 fnOS 上的 nodejs_v24 加载不了。固定 Node v24，ubuntu-latest 自带
+      # gcc/g++/make/python3 可编译 node-pty。
+      - name: Setup Node.js v24 (for bundled node ABI match)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          check-latest: true
+
+      # ── Hermes Agent 离线源码包 ──
+      # 官方 install.sh 默认 git clone NousResearch/hermes-agent。大量 NAS 无法
+      # 稳定连接 GitHub，导致安装后 Agent 启动不了。CI 在 GitHub 内网下载源码并
+      # 嵌入 FPK，install_callback 会优先用本地包并跳过网络 clone。
+      # 下载/解压失败则直接中止构建 —— 绝不能发布一个不含离线源码的包（那等于
+      # 把半成品当成品发，装机时超时或卡在连不上 GitHub）。
+      # 所有 api.github.com 调用带 Authorization：runner 出口 IP 全平台共享，
+      # 未鉴权走 60 次/小时 IP 配额，常被其它仓库耗尽 → 403 → 静默失效。
+      - name: Prepare Hermes Agent offline source
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          DESIRED_REF="$(grep '^HERMES_AGENT_VERSION=' config/bootstrap/hermes-agent-version.env | cut -d= -f2)"
+          [ -z "$DESIRED_REF" ] && DESIRED_REF="main"
+          REF_MARKER="app/hermes-agent-src/.bundled-agent-ref"
+          if [ -f "$REF_MARKER" ] && [ "$(cat "$REF_MARKER")" = "$DESIRED_REF" ] && [ -f "app/hermes-agent-src/pyproject.toml" ]; then
+            echo "Hermes Agent 离线源码包已存在且 ref 匹配 ($DESIRED_REF)，跳过下载"
+            exit 0
+          fi
+          echo "下载 Hermes Agent 源码包 (ref=$DESIRED_REF)..."
+          rm -rf app/hermes-agent-src /tmp/ha.tar.gz /tmp/ha-extract
+          mkdir -p /tmp/ha-extract
+          AUTH=(-H "Authorization: token ${GITHUB_TOKEN}")
+          for i in 1 2 3; do
+            echo "  尝试下载 ($i/3)..."
+            if curl -fsSL --max-time 600 "${AUTH[@]}" \
+                 "https://api.github.com/repos/NousResearch/hermes-agent/tarball/${DESIRED_REF}" \
+                 -o /tmp/ha.tar.gz; then
+              break
+            fi
+            echo "  下载失败，重试..."
+            sleep 5
+          done
+          # 标签下载失败回退 main（保证离线包仍能生成，仅失去该次可复现性）
+          if [ ! -s /tmp/ha.tar.gz ] && [ "$DESIRED_REF" != "main" ]; then
+            echo "WARNING: 按 $DESIRED_REF 下载失败，回退 main"
+            for i in 1 2 3; do
+              curl -fsSL --max-time 600 "${AUTH[@]}" \
+                "https://api.github.com/repos/NousResearch/hermes-agent/tarball/main" \
+                -o /tmp/ha.tar.gz && break
+              sleep 5
+            done
+            DESIRED_REF="main"
+          fi
+          [ -s /tmp/ha.tar.gz ] || { echo "::error:: Hermes Agent 源码包下载失败（GitHub 网络问题），中止构建"; exit 1; }
+          mkdir -p app/hermes-agent-src
+          tar -xzf /tmp/ha.tar.gz -C /tmp/ha-extract --strip-components=1
+          mv /tmp/ha-extract/* app/hermes-agent-src/
+          [ -f "app/hermes-agent-src/pyproject.toml" ] || { echo "::error:: 解压后未找到 pyproject.toml，源码包异常"; exit 1; }
+          (
+            cd app/hermes-agent-src
+            git init -q
+            git config user.email "ci@local"
+            git config user.name "CI Builder"
+            git add -A
+            git commit -q -m "offline bundle"
+          )
+          echo "$DESIRED_REF" > "$REF_MARKER"
+          touch app/hermes-agent-src/.offline-bundle
+          echo "离线源码包准备完成 (ref=$DESIRED_REF)"
+          du -sh app/hermes-agent-src
+
+      - name: Build FPK
+        id: build
+        run: |
+          set -euo pipefail
+          if ! bash scripts/build-fpk.sh dist; then
+            echo "::error:: FPK 打包失败"
+            exit 1
+          fi
+          TARGET_NAME="fnos-${{ env.APP_NAME }}_v${{ steps.target_version.outputs.target_version }}.fpk"
+          if [ ! -f "dist/$TARGET_NAME" ]; then
+            echo "::error:: 未生成 $TARGET_NAME"
+            exit 1
+          fi
+          SIZE=$(du -h "dist/$TARGET_NAME" | cut -f1)
+          echo "打包成功：$TARGET_NAME ($SIZE)"
+          echo "fpks=$TARGET_NAME" >> $GITHUB_OUTPUT
+
+      # ── 硬门禁 3：产物结构 + 必需内容存在性 ──
+      # 门禁只查「结构」不查「必需内容」，照样会放行残缺包。逐条对应一类残缺：
+      #   外层必要条目        → 包根本装不上
+      #   checksum 自洽       → 应用中心校验失败
+      #   内层无 app/ 前缀    → 装完四个关键路径全错位，安装必失败
+      #   内层含 bundled node → 缺它回退 npm install，fnOS 缺 gcc 编不出 node-pty
+      #   内层含 node-pty     → 同上，原生模块缺失
+      #   内层含内核源码      → 缺它装机要么超时要么卡在连不上 GitHub
+      #   内层含 agent node   → 缺它首启联网跑 npm install，NAS 慢网卡很久
+      #   禁携带 skills/      → 会覆盖用户技能库
+      #   cmd/* 可执行位      → 644 让卸载/升级静默跳过 stop，残留进程占端口
+      #   config/privilege    → fnOS 从 app.tgz 内读运行用户配置
+      #   无构建机绝对路径    → 污染会导致 install_callback 找不到 node_modules
+      - name: Verify FPK structure and required contents
+        run: |
+          set -euo pipefail
+          FPK="dist/fnos-${{ env.APP_NAME }}_v${{ steps.target_version.outputs.target_version }}.fpk"
+          echo "校验 $FPK ..."
+
+          OUTER="$(tar tzf "$FPK")"
+          for need in '^manifest$' '^manifest\.checksum$' '^cmd/' '^config/' '^wizard/' '^app\.tgz$'; do
+            if ! echo "$OUTER" | grep -qE "$need"; then
+              echo "::error:: FPK 缺少必要内容: $need"
+              exit 1
+            fi
+          done
+          echo "✅ 外层结构完整"
+
+          # 外层必须含 config/bootstrap/*.env —— install_callback 与
+          # upgrade_callback 都在【回调期】读 ${APP_DIR}/config/bootstrap/*.env，
+          # 那时内层尚未解包。只放在内层会导致读不到 → 降级成 unknown。
+          if ! echo "$OUTER" | grep -qE '^config/bootstrap/.*\.env$'; then
+            echo "::error:: 外层缺 config/bootstrap/*.env（回调期要读，缺了只能降级成 unknown）"
+            exit 1
+          fi
+          echo "✅ 外层含 config/bootstrap/*.env"
+
+          # cmd/* 必须可执行：644 会让 uninstall_init 的 [ -x ... ] 判断失败，
+          # 卸载/升级静默跳过 stop，残留进程占着端口。
+          BAD_PERM="$(tar tvzf "$FPK" | grep -E ' cmd/[a-z_]+$' | awk '$1 !~ /^-rwx/ {print $NF}')"
+          if [ -n "$BAD_PERM" ]; then
+            echo "::error:: 以下 cmd/ 脚本缺可执行位（fnOS 会静默跳过 stop）："
+            echo "$BAD_PERM"
+            exit 1
+          fi
+          echo "✅ cmd/* 均可执行"
+
+          # 解外层到临时目录，再对磁盘上的 app.tgz 做 tar tzf。
+          # 不要用 `tar xzf "$FPK" -O app.tgz | tar tzf -` 这类管道 —— 容易拿到
+          # 空输入而误判。也不要只查外层：内层内容在外层 grep 里一律看不到。
+          TMPDIR="$(mktemp -d)"
+          tar xzf "$FPK" -C "$TMPDIR"
+          [ -s "$TMPDIR/app.tgz" ] || { echo "::error:: 解出的 app.tgz 缺失或为空"; exit 1; }
+          INNER="$(tar tzf "$TMPDIR/app.tgz")"
+          echo "内层条目数: $(echo "$INNER" | wc -l)"
+
+          # manifest.checksum 必须等于包内 app.tgz 的实际 md5
+          WANT="$(tr -d '[:space:]' < "$TMPDIR/manifest.checksum")"
+          GOT="$(md5sum "$TMPDIR/app.tgz" | awk '{print $1}')"
+          if [ "$WANT" != "$GOT" ]; then
+            echo "::error:: manifest.checksum 与 app.tgz 实际 md5 不符: want=$WANT got=$GOT"
+            exit 1
+          fi
+          echo "✅ manifest.checksum 自洽 ($GOT)"
+
+          # 内层归档根不得有 app/ 前缀，也不得有 ./ 前缀
+          FIRST="$(echo "$INNER" | head -1)"
+          case "$FIRST" in
+            app/*|./*)
+              echo "::error:: 内层 app.tgz 首条为 '$FIRST'，带前缀会让装完路径全错位（安装必失败）"
+              exit 1
+              ;;
+          esac
+          echo "✅ 内层无 app/ 与 ./ 前缀（首条: $FIRST）"
+
+          # 内层含 config/privilege：fnOS 从 app.tgz 内读取运行用户配置
+          if ! echo "$INNER" | grep -qE '^config/privilege$'; then
+            echo "::error:: 内层缺 config/privilege，fnOS 无法确定运行用户"
+            exit 1
+          fi
+          echo "✅ 内层含 config/privilege"
+
+          # 禁携带 skills/（会覆盖用户技能库）
+          if echo "$INNER" | grep -qE '^(app/)?skills/'; then
+            echo "::error:: FPK 内层携带 skills/ 目录，安装时会覆盖用户技能库；请从仓库删除后再构建"
+            exit 1
+          fi
+          if echo "$OUTER" | grep -qE '^skills/'; then
+            echo "::error:: FPK 外层携带 skills/ 目录，安装时会覆盖用户技能库"
+            exit 1
+          fi
+          echo "✅ 未携带 skills/（不会覆盖用户技能库）"
+
+          # bundled 运行时（离线安装的前提）
+          if ! echo "$INNER" | grep -qE '^node/lib/node_modules/hermes-web-ui/bin/hermes-web-ui\.mjs$'; then
+            echo "::error:: FPK 未包含 bundled app/node，安装将回退 npm install 并因 fnOS 缺 gcc 失败，构建中止"
+            exit 1
+          fi
+          echo "✅ 检测到 bundled 运行时 app/node（离线安装，无需联网编译）"
+
+          if ! echo "$INNER" | grep -qE '^node/.*node-pty/build/Release/[^/]*\.node$'; then
+            echo "::error:: 未检测到 node-pty 编译产物，离线安装仍需联网编译（fnOS 无 gcc → 卡死）"
+            exit 1
+          fi
+          echo "✅ node-pty 原生模块已打包"
+
+          # 内核：两个必需组件，缺任何一个都算包残
+          if ! echo "$INNER" | grep -qE '^hermes-agent-src/pyproject\.toml$'; then
+            echo "::error:: 未包含 Hermes Agent 离线源码包，安装时仍会尝试 git clone（NAS 弱网必失败）"
+            exit 1
+          fi
+          echo "✅ 检测到 Hermes Agent 离线源码包"
+
+          if ! echo "$INNER" | grep -qE '^hermes-agent-node/node_modules/'; then
+            echo "::error:: FPK 未包含 hermes-agent-node/node_modules，首启仍会联网跑 npm install，构建中止"
+            exit 1
+          fi
+          echo "✅ 检测到 Agent browser tools 依赖（首启跳过 npm install）"
+
+          if ! echo "$INNER" | grep -qE '^hermes-agent-node/ui-tui/node_modules/'; then
+            echo "::warning:: 未包含 hermes-agent-node/ui-tui/node_modules，TUI 可能仍需联网安装"
+          else
+            echo "✅ 检测到 Agent TUI 依赖"
+          fi
+
+          # 构建机绝对路径污染检测（历史上路径 bug 会把 /home/runner/... 带进包，
+          # 导致 install_callback 找不到 hermes-agent-node/node_modules 而回退 npm）
+          if echo "$INNER" | grep -qE 'hermes-agent-node/(home/|.*/\.agent-node-work/)'; then
+            echo "::error:: hermes-agent-node 内混入构建机绝对路径，打包脚本路径处理 bug 复发，构建中止"
+            exit 1
+          fi
+          echo "✅ 无构建机绝对路径污染"
+
+          # 禁宽泛 pkill 模式（会误杀同机 Docker 容器 / 其它 Hermes 应用）
+          if grep -hvE '^[[:space:]]*#' "$TMPDIR"/cmd/* 2>/dev/null | grep -qE 'pkill[^|]*"(bin/|dist/)'; then
+            echo "::error:: cmd/* 中存在宽泛 pkill 模式（bin/ / dist/ 关键词），会误杀 Docker 容器，构建中止"
+            exit 1
+          fi
+          echo "✅ 无宽泛 pkill 模式"
+
+          # 三个回调/启动入口都必须把 DSH 凭据权限纠回 600：
+          # DSH 对 data/.dsh/.credentials.yaml 做 owner-only 硬校验，chmod -R 会
+          # 把它递归放宽 → plugin tree 加载失败（「DSH 模式」下拉框无限转圈）。
+          for cb in install_callback upgrade_callback main; do
+            if ! grep -q 'chmod 600' "$TMPDIR/cmd/$cb" 2>/dev/null; then
+              echo "::error:: cmd/$cb 缺 DSH 凭据 chmod 600 保护（升级一次就会复发转圈）"
+              exit 1
+            fi
+          done
+          echo "✅ DSH 凭据保护在 install/upgrade/main 三处入口均存在"
+
+      # 额外生成一个固定文件名，便于「总是下载最新版」
+      - name: Copy to rolling asset name
+        run: |
+          set -euo pipefail
+          cp "dist/fnos-${{ env.APP_NAME }}_v${{ steps.target_version.outputs.target_version }}.fpk" \
+             "dist/fnos-${{ env.APP_NAME }}.fpk"
+          echo "已生成 dist/fnos-${{ env.APP_NAME }}.fpk"
+
+      # ⚠️ 本步骤【不带 ref 门禁】：三条触发路径（push / dispatch / workflow_run）
+      #    的 github.ref 都是 refs/heads/main。若写成 startsWith(github.ref,
+      #    'refs/tags/')，这些运行会静默跳过发布 —— run 全绿但仓库里永远没有
+      #    Release，下游拿 releases/tags/<tag> 得到 null → 404 → 整条链路红。
+      - name: Publish rolling release (latest)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "Latest FPK (auto-build)"
+          prerelease: true
+          overwrite: true
+          files: |
+            dist/fnos-${{ env.APP_NAME }}.fpk
+            dist/fnos-${{ env.APP_NAME }}_v${{ steps.target_version.outputs.target_version }}.fpk
+          body: |
+            Ekko Studio for fnOS（官方预构建产物 + bundled node_modules，非 Docker）— 自动构建
+
+            - 包版本（迭代号）：`${{ steps.target_version.outputs.target_version }}`
+            - 提交：`${{ github.sha }}`
+            - 生成时间：${{ github.event.head_commit.timestamp }}
+
+            > ⚠️ 这是滚动预发布版本，每次 push 到 main 会覆盖 `fnos-hermes-studio.fpk`。
+            > 固定版本请下载带版本号的附件 `fnos-hermes-studio_v${{ steps.target_version.outputs.target_version }}.fpk`。
+
+      # 稳定版 Release：每次构建都发（tag = v<版本号>）。
+      # 同名 asset 用 overwrite 覆盖 —— 注意因此「版本号没 bump 的重建会覆盖同名
+      # asset，sha256 会变」，核验产物前先确认该 tag 是否被重建过。
+      - name: Publish stable release notes
+        run: |
+          set -euo pipefail
+          HERMES_WEBUI_VER="$(grep '^HERMES_STUDIO_VERSION=' config/bootstrap/hermes-studio-version.env | cut -d= -f2)"
+          HERMES_AGENT_VER="$(grep '^HERMES_AGENT_VERSION=' config/bootstrap/hermes-agent-version.env | cut -d= -f2)"
+          cat > /tmp/relnotes.md <<'NOTE'
+          Ekko Studio for fnOS — 稳定版 v${{ steps.target_version.outputs.target_version }}
+
+          **打包追踪的上游版本**（由 auto-update.yml 自动对齐）：hermes-web-ui `__WEBUI__` ｜ hermes-agent `__AGENT__`
+
+          ## 说明
+          - 跟随官方 GitHub Release 预构建产物（EKKOLearnAI/ekko-studio）自动对齐 hermes-web-ui 版本，比 npm 发布更及时。
+          - 上游产物经 sha256 校验（固定值入库 `config/upstream/`，构建期逐字比对）。
+          - 内置 Hermes Agent 离线源码包（按 NousResearch/hermes-agent 最新 release 标签钉版本），安装时跳过 GitHub git clone，适合 NAS 弱网环境。
+          - Agent browser tools + TUI 依赖预装进 FPK，首启跳过后台 npm install，启动更快。
+          - bundled node 运行时不入库，CI 用 Node v24 编译含原生 node-pty，安装走离线复制，避免 fnOS 缺 gcc 导致安装卡死。
+
+          ## 安装说明
+          1. 飞牛应用中心 -> 手动安装 -> 选择本 fpk。
+          2. 安装后首次启动会自动在后台安装 Hermes Agent（约 1-3 分钟），请稍候。
+          3. 默认监听 8648 端口，点击应用图标在浏览器打开。
+
+          固定版本请从本 Release 附件下载 fnos-hermes-studio_v${{ steps.target_version.outputs.target_version }}.fpk；
+          最新滚动版见 Release latest。
+          NOTE
+          sed -i "s/__WEBUI__/${HERMES_WEBUI_VER}/; s/__AGENT__/${HERMES_AGENT_VER}/" /tmp/relnotes.md
+          echo "稳定版发布说明已生成：/tmp/relnotes.md"
+
+      - name: Publish stable release (upload)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.target_version.outputs.target_version }}
+          name: "Ekko Studio v${{ steps.target_version.outputs.target_version }}"
+          prerelease: false
+          overwrite: true
+          files: dist/fnos-${{ env.APP_NAME }}_v${{ steps.target_version.outputs.target_version }}.fpk
+          body_path: /tmp/relnotes.md
+
+      # 验收标准是 Releases 页有附件且可下载，不是 workflow 显示 success
+      # （静默失败不会标红）。回读 Release 附件做最终确认。
+      - name: Verify release asset is downloadable
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 scripts/verify-release-asset.py \
+            "v${{ steps.target_version.outputs.target_version }}" \
+            "dist/fnos-${{ env.APP_NAME }}_v${{ steps.target_version.outputs.target_version }}.fpk"
+
+      - name: Build Summary
+        run: |
+          set -euo pipefail
+          SHA="$(sha256sum "dist/fnos-${{ env.APP_NAME }}_v${{ steps.target_version.outputs.target_version }}.fpk" | awk '{print $1}')"
+          {
+            echo "### ✅ 构建完成"
+            echo ""
+            echo "| 项目 | 值 |"
+            echo "|------|------|"
+            echo "| 版本 | v${{ steps.target_version.outputs.target_version }} |"
+            echo "| FPK 文件名 | fnos-${{ env.APP_NAME }}_v${{ steps.target_version.outputs.target_version }}.fpk |"
+            echo "| sha256 | \`${SHA}\` |"
+            echo ""
+            echo "滚动最新版见 Release **latest** 的附件 \`fnos-${{ env.APP_NAME }}.fpk\`。"
+          } >> $GITHUB_STEP_SUMMARY

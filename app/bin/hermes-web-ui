@@ -1,0 +1,64 @@
+#!/bin/bash
+#
+# hermes-web-ui 包装脚本
+# 由 config/resource 的 usr-local-linker 链接到 /usr/local/bin/hermes-web-ui，
+# 统一设置 Node 运行时与 HERMES_WEB_UI_HOME 后调用官方 CLI。
+#
+set -e
+
+resolve_pkg_home() {
+    if [ -n "${TRIM_PKGHOME}" ]; then
+        echo "${TRIM_PKGHOME}"
+        return
+    fi
+    local v
+    for v in 1 2 3 4 5 6 7 8; do
+        if [ -d "/vol${v}/@apphome/hermes-studio" ]; then
+            echo "/vol${v}/@apphome/hermes-studio"
+            return
+        fi
+    done
+    # 全部卷都不存在时的最后兜底（正常不会走到：TRIM_PKGHOME 或探测应命中）
+    echo "/vol1/@apphome/hermes-studio"
+}
+
+resolve_node_root() {
+    local cand
+    for cand in /var/apps/nodejs_v24/target \
+                /var/apps/nodejs_v23/target \
+                /vol1/@appcenter/nodejs_v24 \
+                /vol2/@appcenter/nodejs_v24 \
+                /vol3/@appcenter/nodejs_v24 \
+                /vol4/@appcenter/nodejs_v24 \
+                /vol1/@appcenter/nodejs_v23 \
+                /vol2/@appcenter/nodejs_v23 \
+                /vol3/@appcenter/nodejs_v23 \
+                /vol4/@appcenter/nodejs_v23; do
+        [ -x "${cand}/bin/node" ] && { echo "${cand}"; return 0; }
+    done
+    return 1
+}
+
+PKG_HOME="$(resolve_pkg_home)"
+DATA_DIR="${PKG_HOME}/data"
+NODE_PREFIX="${DATA_DIR}/node"
+HERMES_BIN="${NODE_PREFIX}/lib/node_modules/hermes-web-ui/bin/hermes-web-ui.mjs"
+
+NODE_ROOT="$(resolve_node_root)"
+if [ -z "${NODE_ROOT}" ]; then
+    echo "ERROR: Node.js v24/v23 runtime not found. Please install Node.js from App Center." >&2
+    exit 1
+fi
+
+if [ ! -e "$HERMES_BIN" ]; then
+    echo "hermes-web-ui not installed. Please reinstall the app." >&2
+    exit 1
+fi
+
+# 与 cmd/main 保持一致：编码 Agent CLI 的安装落点与查找路径同源（上游环境约定）。
+export NPM_CONFIG_PREFIX="${DATA_DIR}/coding-agent/npm"
+export PATH="${NPM_CONFIG_PREFIX}/bin:${NODE_ROOT}/bin:${NODE_PREFIX}/bin:${DATA_DIR}/npm-global/bin:$PATH"
+export HERMES_WEB_UI_HOME="${DATA_DIR}"
+export HOME="${DATA_DIR}"
+
+exec node "$HERMES_BIN" "$@"

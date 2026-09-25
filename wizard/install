@@ -1,0 +1,42 @@
+[
+    {
+        "stepTitle": "安装说明",
+        "items": [
+            {
+                "type": "tips",
+                "helpText": "<b>Ekko Studio</b><br>基于 Hermes Agent 的 AI 工作台与 Web 控制台，支持流式对话、模型/渠道管理、自动化任务与本地数据持久化。"
+            },
+            {
+                "type": "tips",
+                "helpText": "<br>本包已内置 hermes-web-ui 运行时与依赖（非 Docker、安装时无需联网编译），安装会很快完成。"
+            },
+            {
+                "type": "tips",
+                "helpText": "<br>首次启动会在后台安装 Hermes Agent 内核（约 1-3 分钟，已内置离线源码包），期间即可打开页面。"
+            },
+            {
+                "type": "tips",
+                "helpText": "<br>安装完成后，点击桌面图标在浏览器打开 Web UI，使用默认账号 <b>admin / 123456</b> 登录，随后在「设置」中配置模型 API Key 即可使用。"
+            }
+        ]
+    },
+    {
+        "stepTitle": "微信渠道访问控制",
+        "items": [
+            {
+                "type": "tips",
+                "helpText": "<br>默认情况下，微信渠道的私聊（DM）采用<b>白名单模式</b>：只有管理员在 Web UI「设置-渠道-微信」里手动添加的用户才能发消息。"
+            },
+            {
+                "type": "radio",
+                "field": "WEIXIN_OPEN_ALL_USERS",
+                "label": "是否允许所有微信用户发送消息？",
+                "initValue": "false",
+                "options": [
+                    { "label": "否，保持白名单（安全，推荐）", "value": "false" },
+                    { "label": "是，允许所有人（绕过白名单，风险自负）", "value": "true" }
+                ]
+            }
+        ]
+    }
+]

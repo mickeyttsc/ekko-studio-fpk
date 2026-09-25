@@ -1,0 +1,509 @@
+#!/bin/bash
+#
+# Ekko Studio — 生命周期管理（fnOS 原生 npm 部署，非 Docker）
+#
+# 依赖：manifest install_dep_apps=nodejs_v24，由 fnOS 自动安装 Node.js 运行时。
+#
+
+TRIM_APPDEST="${TRIM_APPDEST:-}"
+TRIM_PKGHOME="${TRIM_PKGHOME:-}"
+TRIM_PKGVAR="${TRIM_PKGVAR:-}"
+
+# 如果 fnOS 没有传入 TRIM_* 路径，则从 /var/apps/hermes-studio 的 symlink 自动推导。
+# 不同机器数据卷可能是 /vol1 /vol2 /vol3 /vol4，hardcode /vol1 会让状态检测找错路径
+# （v0.6.38-1 曾实测 254 上 cmd/main 仍残留 /vol1 默认值，若 TRIM_* 未传会找错卷）。
+_resolve_trim_paths() {
+    local app_link="/var/apps/hermes-studio"
+    # 仅当 TRIM_* 为空 或 指向的目录不存在（例如升级残留错误路径）时，才用 symlink 解析
+    if { [ -z "${TRIM_APPDEST}" ] || [ ! -d "${TRIM_APPDEST}" ]; } && [ -e "${app_link}" ]; then
+        TRIM_APPDEST="$(readlink -f "${app_link}" 2>/dev/null)"
+    fi
+    if { [ -z "${TRIM_PKGHOME}" ] || [ ! -d "${TRIM_PKGHOME}" ]; } && [ -L "${app_link}/home" ]; then
+        TRIM_PKGHOME="$(readlink -f "${app_link}/home" 2>/dev/null)"
+    fi
+    if { [ -z "${TRIM_PKGVAR}" ] || [ ! -d "${TRIM_PKGVAR}" ]; } && [ -L "${app_link}/var" ]; then
+        TRIM_PKGVAR="$(readlink -f "${app_link}/var" 2>/dev/null)"
+    fi
+    # 兜底：根据 TRIM_APPDEST 推导（仅当推导结果确实存在时采用，避免静默落到错误卷）
+    if [ -z "${TRIM_PKGHOME}" ] && [ -n "${TRIM_APPDEST}" ]; then
+        local _ph
+        _ph="$(echo "${TRIM_APPDEST}" | sed 's|/@appcenter/|/@apphome/|')"
+        [ -d "${_ph}" ] && TRIM_PKGHOME="${_ph}"
+    fi
+    if [ -z "${TRIM_PKGVAR}" ] && [ -n "${TRIM_APPDEST}" ]; then
+        local _pv
+        _pv="$(echo "${TRIM_APPDEST}" | sed 's|/@appcenter/|/@appdata/|')"
+        [ -d "${_pv}" ] && TRIM_PKGVAR="${_pv}"
+    fi
+}
+_resolve_trim_paths
+
+# 不再 hardcode /vol1 兜底：解析失败时明确报错，避免 status/start 在错误卷上找文件。
+if [ -z "${TRIM_APPDEST}" ] || [ ! -d "${TRIM_APPDEST}" ] \
+   || [ -z "${TRIM_PKGHOME}" ] || [ ! -d "${TRIM_PKGHOME}" ]; then
+    echo "ERROR: cannot resolve TRIM_APPDEST/TRIM_PKGHOME (APPDEST='${TRIM_APPDEST}' PKGHOME='${TRIM_PKGHOME}')" >&2
+    echo "ERROR: cannot resolve TRIM_APPDEST/TRIM_PKGHOME (APPDEST='${TRIM_APPDEST}' PKGHOME='${TRIM_PKGHOME}')" >> /tmp/hermes-studio-main.err 2>/dev/null || true
+    exit 1
+fi
+TRIM_PKGVAR="${TRIM_PKGVAR:-$(echo "${TRIM_APPDEST}" | sed 's|/@appcenter/|/@appdata/|')}"
+
+DATA_DIR="${TRIM_PKGHOME}/data"
+NODE_PREFIX="${DATA_DIR}/node"
+HERMES_BIN="${NODE_PREFIX}/lib/node_modules/hermes-web-ui/bin/hermes-web-ui.mjs"
+LOG_FILE="${TRIM_PKGVAR:-/tmp/hermes-studio-var}/info.log"
+WEB_UI_HOME="${DATA_DIR}"
+PORT="${HERMES_PORT:-8648}"
+
+HERMES_AGENT_ROOT="${TRIM_PKGHOME}/hermes-agent"
+HERMES_HOME="${TRIM_PKGHOME}/hermes-home"
+
+log_msg() { echo "$(date '+%Y-%m-%d %H:%M:%S') - [main] $1" >> "${LOG_FILE}" 2>/dev/null || true; }
+
+# 清理本应用相关子进程（web-ui / gateway / bridge / mcp / watchdog / monitor / dashboard）。
+# 旧版本 install_init/cmd/main 只清理 web-ui 主进程，导致 gateway/bridge 残留，
+# 新实例启动时 agent bridge 因 IPC socket 冲突而退出（code=1）。
+# 参考 fnos-hermes-agent v0.20.39 官方修复：杀掉残留的 root monitor/gateway/dashboard。
+#
+# v0.6.38-2 关键修复：所有 pkill 模式用【本应用专属路径】锚定，绝不使用宽泛关键词
+# （"hermes gateway"/"dist/server/index.js"/"hermes-agent-monitor"/"hermes_bridge.py" 等）。
+# 原因（254 实测）：Docker 版官方容器（hermes-webui + hermes-agent）与 FPK 版共存时，
+#   - "hermes gateway" 会杀掉 Docker 容器里的 hermes gateway 进程；
+#   - "dist/server/index.js" 会杀掉 Docker hermes-webui 容器进程；
+#   - "hermes_bridge.py" 会杀掉 Docker 容器里的 bridge 进程；
+# 应用间互相 pkill 会导致"装一个、坏一个"的连锁故障。
+# 本应用 web-ui 树（含 dist/server/index.js、hermes_bridge.py、hermes-studio-mcp、
+# mcp_stdio_watchdog 等全部子进程）都位于 NODE_PREFIX/lib/node_modules/hermes-web-ui 下，
+# 一条锚定模式即可全覆盖；agent 树由 HERMES_AGENT_ROOT/venv/bin/hermes 拉起。
+clean_residual_processes() {
+    local sig="${1:-SIGKILL}"
+    local pats=(
+        "${NODE_PREFIX}/lib/node_modules/hermes-web-ui"
+        "${HERMES_AGENT_ROOT}/venv/bin/hermes"
+    )
+    local pat
+    for pat in "${pats[@]}"; do
+        [ -n "${pat}" ] || continue
+        pkill -${sig} -f "${pat}" 2>/dev/null || true
+    done
+    sleep 1
+    for pat in "${pats[@]}"; do
+        [ -n "${pat}" ] || continue
+        pkill -9 -f "${pat}" 2>/dev/null || true
+    done
+}
+
+# 清理残留运行时文件，避免新实例被旧 PID / 日志 / IPC socket 误导。
+clean_residual_files() {
+    rm -f "${WEB_UI_HOME}/server.pid" 2>/dev/null || true
+    rm -f /tmp/hermes-agent-bridge.sock 2>/dev/null || true
+    rm -f /tmp/hermes-web-ui.sock 2>/dev/null || true
+    # 重命名旧 server.log，避免 status/start 把旧日志里的 "listening" 当成当前状态
+    if [ -f "${WEB_UI_HOME}/server.log" ]; then
+        mv -f "${WEB_UI_HOME}/server.log" "${WEB_UI_HOME}/server.log.old.$(date +%s)" 2>/dev/null || \
+            rm -f "${WEB_UI_HOME}/server.log" 2>/dev/null || true
+    fi
+}
+
+resolve_node_root() {
+    local cand
+    for cand in /var/apps/nodejs_v24/target \
+                /var/apps/nodejs_v22/target \
+                /var/apps/nodejs_v23/target \
+                /vol1/@appcenter/nodejs_v24 \
+                /vol2/@appcenter/nodejs_v24 \
+                /vol3/@appcenter/nodejs_v24 \
+                /vol4/@appcenter/nodejs_v24 \
+                /vol1/@appcenter/nodejs_v22 \
+                /vol2/@appcenter/nodejs_v22 \
+                /vol3/@appcenter/nodejs_v22 \
+                /vol4/@appcenter/nodejs_v22 \
+                /vol1/@appcenter/nodejs_v23 \
+                /vol2/@appcenter/nodejs_v23 \
+                /vol3/@appcenter/nodejs_v23 \
+                /vol4/@appcenter/nodejs_v23; do
+        [ -x "${cand}/bin/node" ] && { echo "${cand}"; return 0; }
+    done
+    return 1
+}
+
+NODE_ROOT="$(resolve_node_root)"
+NODE_BIN="${NODE_ROOT}/bin/node"
+if [ -z "${NODE_ROOT}" ]; then
+    log_msg "ERROR: Node.js v24/v23 runtime not found. Please install Node.js from App Center."
+    exit 1
+fi
+
+# npm-global/bin 必须进 PATH：WebUI 的「编码 Agent（DSH 等）」安装走裸 `npm install -g`，
+# npm 按用户级 .npmrc 的 prefix 落盘，产物可能落在 ${HERMES_HOME}/npm-global 而非 ${NODE_PREFIX}/bin。
+# WebUI 之后用 findCommandPaths("dsh", PATH) 反查可执行文件，PATH 里没有该目录就永远报
+# 503 DSH_DEPENDENCY_UNAVAILABLE，表现为「DSH 模式」下拉框无限转圈。
+# 编码 Agent（dsh / claude-code / codex 等）的安装落点与查找路径必须【同源】。
+# 上游的权威解法是环境约定：NPM_CONFIG_PREFIX 指向固定目录，该目录的 bin 同源进
+# PATH（可从上游 Dockerfile / 已发布镜像的 config.Env 核到）。
+# NPM_CONFIG_PREFIX 优先级高于用户级 .npmrc 的 prefix，export 即可压过它。
+# 末尾两个 npm-global 目录是兜底（有人绕过 WebUI 裸跑 npm i -g 时仍能找到）。
+export NPM_CONFIG_PREFIX="${DATA_DIR}/coding-agent/npm"
+export PATH="${NPM_CONFIG_PREFIX}/bin:${HERMES_AGENT_ROOT}/venv/bin:${NODE_ROOT}/bin:${NODE_PREFIX}/bin:${HERMES_HOME}/npm-global/bin:${HOME}/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:${PATH}"
+export HERMES_AGENT_ROOT="${HERMES_AGENT_ROOT}"
+export HERMES_HOME="${HERMES_HOME}"
+export HERMES_WEB_UI_HOME="${WEB_UI_HOME}"
+export HOME="${WEB_UI_HOME}"
+
+# ---------------------------------------------------------------------------
+# Hermes Agent 后台安装：非阻塞触发（v0.6.38-2 核心修复）
+# ---------------------------------------------------------------------------
+# 旧版 wait_for_hermes_agent 会【同步阻塞】最多 300s 等待 Agent 后台安装完成，
+# 期间 web-ui 不启动、8648 端口不监听。而 fnOS 微应用（ui/config）点击图标后
+# 直接打开 http://<NAS>:8648/，端口未就绪 → 浏览器一直转圈/连接失败。
+# 全新安装时 agent 安装需 3-5 分钟（uv + pip 依赖），这就是"安装完运行一直转圈"的根因。
+#
+# 新策略：web-ui 立即启动（agent 缺失时 bridge 启动失败只是 warn，页面照常打开），
+# agent 继续在后台安装；由 agent-ready watchdog（见 start_agent_ready_watchdog）
+# 在 agent 就绪后自动重启 web-ui 让 bridge 连上。start 永不因 agent 未就绪而阻塞。
+ensure_agent_background_install() {
+    local bg_script="${HERMES_HOME}/.install-agent.sh"
+    local bg_marker="${HERMES_HOME}/.install-agent.marker"
+    local bg_log="${HERMES_HOME}/install-agent.log"
+    local bg_pid_file="${HERMES_HOME}/.install-agent.pid"
+
+    # 已就绪
+    if [ -x "${HERMES_AGENT_ROOT}/venv/bin/hermes" ]; then
+        fix_agent_permissions
+        log_msg "Hermes Agent ready"
+        return 0
+    fi
+
+    # marker=failed：清理一次后重试（后台脚本自身失败时写 failed）
+    if [ -f "${bg_marker}" ] && [ "$(cat "${bg_marker}" 2>/dev/null)" = "failed" ]; then
+        log_msg "WARNING: background agent install marked failed, cleaning & retrying"
+        rm -f "${bg_marker}" "${bg_pid_file}"
+        rm -rf "${HERMES_AGENT_ROOT}" 2>/dev/null || true
+    fi
+
+    # 后台安装已在运行则不动
+    if [ -f "${bg_pid_file}" ]; then
+        local old_pid
+        old_pid=$(cat "${bg_pid_file}" 2>/dev/null)
+        if [ -n "${old_pid}" ] && kill -0 "${old_pid}" 2>/dev/null; then
+            log_msg "Hermes Agent background install already running (PID ${old_pid})"
+            return 0
+        fi
+    fi
+
+    # 有安装脚本则启动（install_callback 生成，或旧版残留）
+    if [ -x "${bg_script}" ]; then
+        log_msg "Starting Hermes Agent background install from ${bg_script}"
+        nohup "${bg_script}" >> "${bg_log}" 2>&1 &
+        echo $! > "${bg_pid_file}"
+        return 0
+    fi
+
+    # 连安装脚本都没有（异常：install_callback 未能生成）——web-ui 仍可启动，
+    # 但 agent 功能不可用。记录明确日志，供后续重装修复。
+    log_msg "WARNING: Hermes Agent not installed and no background installer available; web-ui will start without agent"
+    return 0
+}
+
+# agent-ready watchdog：web-ui 启动后，若 agent 未就绪，则后台轮询等待 agent
+# 安装完成，然后自动重启 web-ui 让 agent bridge 建立连接。幂等：已在跑则跳过。
+# watchdog 每 10s 检查一次，最长 30 分钟；agent 一直失败则最多重试安装 3 次后退出。
+start_agent_ready_watchdog() {
+    local wd_pid_file="${TRIM_PKGVAR}/.agent-ready-watchdog.pid"
+    if [ -f "${wd_pid_file}" ]; then
+        local old_pid
+        old_pid=$(cat "${wd_pid_file}" 2>/dev/null)
+        if [ -n "${old_pid}" ] && kill -0 "${old_pid}" 2>/dev/null; then
+            log_msg "agent-ready watchdog already running (PID ${old_pid})"
+            return 0
+        fi
+    fi
+
+    local wd_script="${TRIM_PKGVAR}/agent-ready-watchdog.sh"
+    cat > "${wd_script}" <<WD_EOF
+#!/bin/bash
+# Ekko Studio agent-ready watchdog (auto-generated by cmd/main)
+# 轮询等待 Hermes Agent 安装完成 → 重启 web-ui → bridge 连上后退出。
+LOG_FILE="${LOG_FILE}"
+NODE_BIN="${NODE_BIN}"
+HERMES_BIN="${HERMES_BIN}"
+PORT="${PORT}"
+AGENT_ROOT="${HERMES_AGENT_ROOT}"
+HERMES_HOME="${HERMES_HOME}"
+MARKER="\${HERMES_HOME}/.install-agent.marker"
+PID_FILE="\${HERMES_HOME}/.install-agent.pid"
+SCRIPT="\${HERMES_HOME}/.install-agent.sh"
+WD_PID_FILE="${TRIM_PKGVAR}/.agent-ready-watchdog.pid"
+
+wl() { echo "\$(date '+%Y-%m-%d %H:%M:%S') - [watchdog] \$1" >> "\${LOG_FILE}" 2>/dev/null || true; }
+
+attempt=0
+i=0
+while [ \${i} -lt 180 ]; do
+    if [ -x "\${AGENT_ROOT}/venv/bin/hermes" ]; then
+        wl "agent ready after \${i}0s, restarting web-ui to connect bridge"
+        "\${NODE_BIN}" "\${HERMES_BIN}" restart --port "\${PORT}" --no-open >> "\${LOG_FILE}" 2>&1
+        # 等待端口重新监听（最多 60s）
+        j=0
+        while [ \${j} -lt 120 ]; do
+            if ss -tln 2>/dev/null | grep -q ":\${PORT}" || \
+               grep -qE "listening on 0\.0\.0\.0:\${PORT}|app\\.listen called" "\${HERMES_HOME}/../data/server.log" 2>/dev/null; then
+                wl "web-ui restarted after agent ready"
+                rm -f "\${WD_PID_FILE}"
+                exit 0
+            fi
+            sleep 0.5
+            j=\$((j+1))
+        done
+        wl "WARNING: web-ui did not come back after restart; leaving it to user"
+        rm -f "\${WD_PID_FILE}"
+        exit 1
+    fi
+
+    # agent 安装失败 → 最多重试 3 次
+    if [ -f "\${MARKER}" ] && [ "\$(cat "\${MARKER}" 2>/dev/null)" = "failed" ]; then
+        attempt=\$((attempt+1))
+        if [ \${attempt} -ge 3 ]; then
+            wl "agent install failed 3 times, giving up (web-ui keeps running without agent)"
+            rm -f "\${WD_PID_FILE}"
+            exit 1
+        fi
+        wl "agent install marked failed (attempt \${attempt}), cleaning & retrying"
+        rm -f "\${MARKER}" "\${PID_FILE}"
+        rm -rf "\${AGENT_ROOT}" 2>/dev/null || true
+        if [ -x "\${SCRIPT}" ]; then
+            nohup "\${SCRIPT}" >> "\${HERMES_HOME}/install-agent.log" 2>&1 &
+            echo \$! > "\${PID_FILE}"
+        fi
+    fi
+
+    sleep 10
+    i=\$((i+1))
+done
+wl "agent not ready within 30min, watchdog exiting (web-ui keeps running)"
+rm -f "\${WD_PID_FILE}"
+WD_EOF
+    chmod +x "${wd_script}" 2>/dev/null || true
+
+    nohup "${wd_script}" >> "${LOG_FILE}" 2>&1 &
+    echo $! > "${wd_pid_file}"
+    log_msg "agent-ready watchdog started (PID $(cat "${wd_pid_file}"))"
+}
+
+# 修复 Hermes Agent / HOME 目录属主。cmd/main 通常以 root 运行（或被 fnOS 以特权启动），
+# 而 install_callback 可能以当前登录用户运行，导致后台 install.sh 创建的文件属主错误。
+fix_agent_permissions() {
+    local app_user="${TRIM_USERNAME:-hermes-studio}"
+    # 仅在 root 权限下执行 chown，避免普通用户运行时报错
+    if [ "$(id -u)" -ne 0 ]; then
+        return 0
+    fi
+    for d in "${HERMES_HOME}" "${HERMES_AGENT_ROOT}"; do
+        [ -d "${d}" ] || continue
+        if chown -R "${app_user}:${app_user}" "${d}" 2>/dev/null; then
+            log_msg "Permissions fixed: ${d} -> ${app_user}"
+        else
+            log_msg "WARNING: failed to chown ${d} to ${app_user}"
+        fi
+    done
+    # 确保 hermes-home 对应用用户可写，Agent 目录可被非 root 执行（避免 [ -x ] 失败）
+    if [ -d "${HERMES_HOME}" ]; then
+        chmod -R u+rwX "${HERMES_HOME}" 2>/dev/null || true
+    fi
+    if [ -d "${HERMES_AGENT_ROOT}" ]; then
+        chmod -R 755 "${HERMES_AGENT_ROOT}" 2>/dev/null || true
+    fi
+    # ⛔ DSH 凭据 owner-only 保护：任何 chmod -R / rsync / 备份恢复都可能把
+    # data/.dsh/.credentials.yaml 放宽，DSH 对该文件做 owner-only 硬校验，
+    # 权限变宽则 plugin tree 加载失败（「DSH 模式」下拉框无限转圈）。
+    # 每次启动无条件纠回 600（幂等，无副作用）。
+    chmod 600 "${DATA_DIR}/.dsh/.credentials.yaml" 2>/dev/null || true
+}
+
+is_port_listening() {
+    local port="$1"
+    # 优先用 ss/netstat，比解析 /proc/net/tcp 更可靠
+    if command -v ss >/dev/null 2>&1; then
+        ss -tln 2>/dev/null | awk -v p=":${port}" '$0 ~ p && $0 ~ /LISTEN/ {exit 0} END {exit 1}'
+        return $?
+    fi
+    if command -v netstat >/dev/null 2>&1; then
+        netstat -tln 2>/dev/null | grep -qE ":[[:space:]]*${port}[[:space:]]"
+        return $?
+    fi
+    local hex
+    hex=$(printf "%04X" "$port")
+    grep -qE "[0-9A-Fa-f]{8,32}:${hex}[[:space:]]" /proc/net/tcp /proc/net/tcp6 2>/dev/null
+}
+
+pid_from_file() {
+    local f="${WEB_UI_HOME}/server.pid"
+    [ -r "$f" ] && head -n1 "$f" | tr -d '[:space:]' | grep -E '^[0-9]+$'
+}
+
+# 验证 PID 文件中的进程是否真的是 hermes-web-ui，避免 PID 复用导致误判。
+verify_pid_process() {
+    local pid="$1"
+    [ -z "${pid}" ] && return 1
+    [ -d "/proc/${pid}" ] || return 1
+    local cmdline
+    cmdline=$(cat "/proc/${pid}/cmdline" 2>/dev/null | tr '\0' ' ')
+    echo "${cmdline}" | grep -qE "hermes-web-ui|dist/server/index.js"
+}
+
+status() {
+    local pid
+    # 优先：端口监听即认为运行中
+    if is_port_listening "$PORT"; then
+        return 0
+    fi
+    # 其次：PID 文件存在且进程确实是 hermes-web-ui
+    pid=$(pid_from_file)
+    if [ -n "$pid" ] && verify_pid_process "$pid"; then
+        return 0
+    fi
+    return 1
+}
+
+# 把 ${HERMES_HOME}/npm-global/bin 与 ${HOME}/.npm-global/bin 里的可执行文件
+# 软链进 ${NODE_PREFIX}/bin（该目录本就在 WebUI 的 PATH 中）。
+# 背景：WebUI 安装编码 Agent（dsh/claude-code/codex 等）时走裸 `npm install -g`，
+# 落点由用户级 .npmrc 的 prefix 决定，可能落在 npm-global 而非 NODE_PREFIX。
+# 而 WebUI 后续用 findCommandPaths(name, PATH) 反查可执行文件，找不到就报
+# 503 DSH_DEPENDENCY_UNAVAILABLE（前端表现为下拉框无限"正在加载模式"）。
+# 该函数幂等，已在 NODE_PREFIX/bin 中的同名文件不覆盖。
+link_npm_global_bins() {
+    local bin_dir="${NODE_PREFIX}/bin"
+    local src_dir entry name
+    # NODE_PREFIX/bin 正常由 install_callback 创建；若缺失则补建，保证兜底软链仍能落地。
+    mkdir -p "${bin_dir}" 2>/dev/null || return 0
+    for src_dir in "${HERMES_HOME}/npm-global/bin" "${HOME}/.npm-global/bin"; do
+        [ -d "${src_dir}" ] || continue
+        for entry in "${src_dir}"/*; do
+            [ -e "${entry}" ] || continue
+            name="$(basename "${entry}")"
+            [ -e "${bin_dir}/${name}" ] && continue
+            ln -sf "${entry}" "${bin_dir}/${name}" 2>/dev/null && \
+                log_msg "linked npm-global bin: ${name} -> ${entry}"
+        done
+    done
+    return 0
+}
+
+# ── 端口占用者归属防护（启动前必做）────────────────────────────────────────
+# 官方 CLI（hermes-web-ui.mjs）的 startDaemon() 发现目标端口被占会直接
+# killListeningPids() 杀掉占用进程。若占用者是别的应用（例如 Docker 版
+# 官方容器），直接启动本应用会无声杀掉对方、用户会话无预警断线。
+# 判归属：cmdline 含本应用 NODE_PREFIX 路径 = 自己的旧进程（重启语义，放行）；
+# 否则拒启并提示先停对方，绝不默默杀人。
+check_port_owner() {
+    local occupiers occ_cmd pid
+    if command -v ss >/dev/null 2>&1; then
+        occupiers="$(ss -lntpH "sport = :${PORT}" 2>/dev/null | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)"
+    fi
+    if [ -z "${occupiers}" ] && command -v fuser >/dev/null 2>&1; then
+        occupiers="$(fuser "${PORT}/tcp" 2>/dev/null | tr -d '[:space:]' | awk '{print $1}')"
+    fi
+    [ -z "${occupiers}" ] && return 0
+
+    for pid in ${occupiers}; do
+        occ_cmd="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null)"
+        case "${occ_cmd}" in
+            *"${NODE_PREFIX}/lib/node_modules/hermes-web-ui"*|*"${HERMES_AGENT_ROOT}/venv/bin/hermes"*)
+                log_msg "port ${PORT} held by this app (PID ${pid}), restart semantics -> allowed"
+                ;;
+            *)
+                log_msg "ERROR: port ${PORT} is held by another process (PID ${pid}): ${occ_cmd}"
+                echo "ERROR: 端口 ${PORT} 被其它进程占用 (PID ${pid})，请先停止对方应用后再启动本应用。" >&2
+                return 1
+                ;;
+        esac
+    done
+    return 0
+}
+
+start_process() {
+    # 启动前强制清理：杀掉所有 Hermes 相关残留进程、释放 8648 端口、
+    # 清理 socket/PID/旧日志。这能解决"v18 能启动但页面打不开"、
+    # "v19 安装完启动不了"等由旧实例/端口占用导致的问题。
+    log_msg ">>> start_process: pre-start cleanup"
+    # 端口归属防护必须在任何清理/启动之前：若端口被别的应用占着，
+    # 直接往下走会触发官方 CLI 的 killListeningPids() 把对方杀掉。
+    if ! check_port_owner; then
+        return 1
+    fi
+    clean_residual_processes
+    clean_residual_files
+    sleep 1
+
+    if [ ! -e "$HERMES_BIN" ]; then
+        log_msg "hermes-web-ui not found at ${HERMES_BIN}, please reinstall the app"
+        return 1
+    fi
+
+    # v0.6.38-2 核心修复：不再同步等待 Agent 安装完成（旧版最多阻塞 300s，
+    # 期间 8648 不监听 → 用户打开应用一直转圈）。改为：
+    #  1. 确保后台安装已触发（非阻塞，立即返回）
+    #  2. 立即启动 web-ui（agent 缺失时页面照常打开）
+    #  3. 若 agent 未就绪，启动 agent-ready watchdog：agent 装好后自动重启
+    #     web-ui，让 agent bridge 连上（bridge 只在 ready 后退出才自动重启，
+    #     首次启动时 agent 缺失会导致 bridge 一次失败后不再重连）。
+    ensure_agent_background_install
+
+    mkdir -p "${TRIM_PKGVAR}" 2>/dev/null
+
+    # 再次清理，确保后台安装过程中没有产生新的残留进程或 socket 占用。
+    clean_residual_processes
+    clean_residual_files
+    sleep 1
+
+    # 把 npm-global 里装好的 CLI 兜底软链进 NODE_PREFIX/bin（原本就在 PATH 里），
+    # 让 WebUI 的 findCommandPaths() 能反查到 dsh 等编码 Agent 可执行文件。
+    link_npm_global_bins
+
+    log_msg "starting hermes-web-ui on port ${PORT} ..."
+    # 官方 CLI 自带 daemon，--no-open 避免 NAS 上尝试打开浏览器。
+    # 使用 ${NODE_BIN} 显式执行 .mjs，避免 shebang/执行权限在某些环境不一致。
+    nohup "${NODE_BIN}" "${HERMES_BIN}" start --port "$PORT" --no-open >> "${LOG_FILE}" 2>&1 &
+
+    local i agent_ready=0
+    [ -x "${HERMES_AGENT_ROOT}/venv/bin/hermes" ] && agent_ready=1
+    for i in $(seq 1 120); do
+        if is_port_listening "$PORT"; then
+            log_msg "started, port ${PORT} listening"
+            if [ "${agent_ready}" != "1" ]; then
+                start_agent_ready_watchdog
+            fi
+            return 0
+        fi
+        # 兜底：通过 server.log 判断 bootstrap 是否已就绪
+        if grep -qE "listening on 0\.0\.0\.0:${PORT}|app\.listen called" "${WEB_UI_HOME}/server.log" 2>/dev/null; then
+            log_msg "started, server log reports listening on port ${PORT}"
+            if [ "${agent_ready}" != "1" ]; then
+                start_agent_ready_watchdog
+            fi
+            return 0
+        fi
+        sleep 0.5
+    done
+    log_msg "ERROR: port ${PORT} still not listening after 60s, see ${LOG_FILE}"
+    return 1
+}
+
+stop_process() {
+    log_msg "stopping hermes-web-ui ..."
+    if [ -e "$HERMES_BIN" ]; then
+        "${NODE_BIN}" "${HERMES_BIN}" stop >> "${LOG_FILE}" 2>&1 || true
+    fi
+    # 兜底：清理所有相关子进程
+    clean_residual_processes
+    clean_residual_files
+    sleep 1
+    return 0
+}
+
+case "$1" in
+    start)  start_process ;;
+    stop)   stop_process ;;
+    status) status && exit 0 || exit 3 ;;
+    *)      exit 1 ;;
+esac

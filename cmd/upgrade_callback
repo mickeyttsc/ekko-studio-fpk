@@ -1,0 +1,152 @@
+#!/bin/bash
+
+### 升级后回调 — 校验/重装 hermes-web-ui（npm 模式），修复权限
+### 与 install_callback 保持幂等：版本一致则跳过，不一致则覆盖安装
+
+set -e
+
+LOG_FILE="${TRIM_PKGVAR:-/tmp/hermes-studio-var}/info.log"
+
+log_msg() {
+    local msg="$(date '+%Y-%m-%d %H:%M:%S') - [upgrade] $1"
+    echo "$msg"
+    echo "$msg" >> "${LOG_FILE}" 2>/dev/null || true
+}
+
+toast_err() {
+    echo "$*" > "$TRIM_TEMP_LOGFILE"
+}
+
+trap 'toast_err "脚本出错(L${LINENO}): $(tail -3 "${LOG_FILE}" 2>/dev/null)"' ERR
+
+# 使用 fnOS 应用中心 Node.js 运行时，而不是假设 hermes-web-ui 已装在 data/node
+resolve_node_root() {
+    local cand
+    for cand in /var/apps/nodejs_v24/target \
+                /var/apps/nodejs_v22/target \
+                /var/apps/nodejs_v23/target \
+                /vol1/@appcenter/nodejs_v24 \
+                /vol2/@appcenter/nodejs_v24 \
+                /vol3/@appcenter/nodejs_v24 \
+                /vol4/@appcenter/nodejs_v24 \
+                /vol1/@appcenter/nodejs_v22 \
+                /vol2/@appcenter/nodejs_v22 \
+                /vol3/@appcenter/nodejs_v22 \
+                /vol4/@appcenter/nodejs_v22 \
+                /vol1/@appcenter/nodejs_v23 \
+                /vol2/@appcenter/nodejs_v23 \
+                /vol3/@appcenter/nodejs_v23 \
+                /vol4/@appcenter/nodejs_v23; do
+        [ -x "${cand}/bin/node" ] && { echo "${cand}"; return 0; }
+    done
+    return 1
+}
+
+DATA_DIR="${TRIM_PKGHOME}/data"
+NODE_ROOT="$(resolve_node_root)"
+NODE_BIN="${NODE_ROOT}/bin/node"
+NPM_BIN="${NODE_ROOT}/bin/npm"
+HERMES_AGENT_ROOT="${TRIM_PKGHOME}/hermes-agent"
+HERMES_HOME="${TRIM_PKGHOME}/hermes-home"
+APP_DIR="${TRIM_APPDEST}"
+
+export HOME="${DATA_DIR}"
+export HERMES_WEB_UI_HOME="${DATA_DIR}"
+export PATH="${NODE_ROOT}/bin:${DATA_DIR}/node/bin:${PATH}"
+export npm_config_registry="https://registry.npmmirror.com"
+# 编码 Agent CLI 落点对齐上游环境约定（与 cmd/main / app/bin 保持一致）
+export NPM_CONFIG_PREFIX="${DATA_DIR}/coding-agent/npm"
+
+# ---------------------------------------------------------------------------
+# 1. 读取目标版本号
+# ---------------------------------------------------------------------------
+if [ ! -f "${APP_DIR}/config/bootstrap/hermes-studio-version.env" ]; then
+    toast_err "hermes-studio-version.env 不存在，请检查打包是否包含 config/bootstrap/"
+    exit 1
+fi
+# shellcheck disable=SC1090
+. "${APP_DIR}/config/bootstrap/hermes-studio-version.env"
+if [ -z "${HERMES_STUDIO_VERSION}" ]; then
+    toast_err "hermes-studio-version.env 中未定义 HERMES_STUDIO_VERSION"
+    exit 1
+fi
+log_msg "hermes-web-ui target version: ${HERMES_STUDIO_VERSION}"
+
+# ---------------------------------------------------------------------------
+# 2. 校验 Node.js 运行时
+# ---------------------------------------------------------------------------
+if [ ! -x "${NODE_BIN}" ]; then
+    log_msg "ERROR: Node.js runtime not found"
+    toast_err "未找到 Node.js 运行时，请检查 install_dep_apps=nodejs_v24"
+    exit 1
+fi
+
+# 升级时 hermes-web-ui 若未安装/损坏，直接调用 install_callback 重新完整安装。
+# upgrade_callback 与 install_callback 位于同一目录 /var/apps/hermes-studio/cmd/。
+run_install_callback() {
+    local cb
+    cb="$(cd "$(dirname "$0")" && pwd)/install_callback"
+    if [ -x "${cb}" ]; then
+        log_msg "Falling back to install_callback: ${cb}"
+        exec "${cb}"
+    fi
+    cb="/var/apps/hermes-studio/cmd/install_callback"
+    if [ -x "${cb}" ]; then
+        log_msg "Falling back to install_callback: ${cb}"
+        exec "${cb}"
+    fi
+    toast_err "找不到 install_callback"
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
+# 3. 检测已安装版本，决定是否需要重装
+# ---------------------------------------------------------------------------
+INSTALLED_VER=""
+if [ -x "${HERMES_BIN}" ]; then
+    INSTALLED_VER=$("${NODE_BIN}" "${HERMES_BIN}" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+fi
+log_msg "installed: ${INSTALLED_VER:-none}, target: ${HERMES_STUDIO_VERSION}"
+
+if [ -n "${INSTALLED_VER}" ] && [ "${INSTALLED_VER}" = "${HERMES_STUDIO_VERSION}" ]; then
+    log_msg "版本匹配，无需重装"
+else
+    # 版本缺失或不匹配时，直接复用 install_callback 完成完整安装（bundled
+    # node_modules、Agent 后台安装、权限修复等）。避免 upgrade_callback 再
+    # 用 npm install -g 装到系统 Node global 目录。
+    log_msg "版本不匹配或缺失，回退到完整安装流程"
+    run_install_callback
+fi
+
+ACTUAL_VER=$("${NODE_BIN}" "${HERMES_BIN}" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "unknown")
+log_msg "hermes-web-ui now: ${ACTUAL_VER}"
+
+# ---------------------------------------------------------------------------
+# 4. 修复权限
+# ---------------------------------------------------------------------------
+if [ -n "${TRIM_USERNAME}" ]; then
+    log_msg "=== 修复权限 ==="
+    for d in "${DATA_DIR}" "${HERMES_HOME}" "${HERMES_AGENT_ROOT}"; do
+        [ -d "${d}" ] || continue
+        chown -R "${TRIM_USERNAME}:${TRIM_USERNAME}" "${d}" 2>>"${LOG_FILE}" || \
+            log_msg "chown ${d} → FAILED"
+    done
+    chmod -R 750 "${DATA_DIR}" 2>>"${LOG_FILE}" || \
+        log_msg "chmod ${DATA_DIR} → FAILED"
+        # ⛔ DSH 凭据 owner-only 保护：上面的 chmod -R 会把 data/.dsh/.credentials.yaml
+        # 递归放宽，而 DSH 对该文件做 owner-only 硬校验，权限变宽则整个 plugin tree
+        # 加载失败 —— 表现为 WebUI「DSH 模式」下拉框无限转圈。这里无条件纠回 600（幂等）。
+    chmod 600 "${DATA_DIR}/.dsh/.credentials.yaml" 2>/dev/null || true
+    if [ -d "${HERMES_HOME}" ]; then
+        chmod -R u+rwX "${HERMES_HOME}" 2>>"${LOG_FILE}" || \
+            log_msg "chmod ${HERMES_HOME} → FAILED"
+    fi
+    if [ -d "${HERMES_AGENT_ROOT}" ]; then
+        chmod -R 755 "${HERMES_AGENT_ROOT}" 2>>"${LOG_FILE}" || \
+            log_msg "chmod ${HERMES_AGENT_ROOT} → FAILED"
+    fi
+fi
+
+trap - ERR
+log_msg "upgrade_callback finished successfully."
+exit 0

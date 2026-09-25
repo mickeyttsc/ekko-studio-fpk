@@ -1,0 +1,13 @@
+{
+    ".url": {
+        "hermes-studio.Application": {
+            "title": "Ekko Studio",
+            "icon": "images/icon_{0}.png",
+            "type": "url",
+            "protocol": "",
+            "port": "8648",
+            "url": "/",
+            "allUsers": false
+        }
+    }
+}

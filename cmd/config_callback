@@ -1,0 +1,5 @@
+#!/bin/bash
+
+### 配置变更后回调 — hermes-web-ui 通过自带 Web 控制台自行管理配置（admin/123456 登录）
+
+exit 0

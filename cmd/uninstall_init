@@ -1,0 +1,59 @@
+#!/bin/bash
+
+### 卸载前回调 — 停止应用并清理残留进程
+### ⛔ pkill 一律用本应用专属路径锚定：宽泛关键词（bin/hermes-web-ui /
+###    dist/server/index.js）会误杀同机 Docker 版官方容器与其它 Hermes 应用。
+
+TRIM_APPDEST="${TRIM_APPDEST:-}"
+TRIM_PKGHOME="${TRIM_PKGHOME:-}"
+TRIM_PKGVAR="${TRIM_PKGVAR:-}"
+
+# ── TRIM_* 自解析（不 hardcode 卷号）────────────────────────────────────────
+# fnOS 偶尔不传 TRIM_*，写死 /vol1 会让日志/状态检测落到不存在的卷，
+# 升级失败时零诊断信息。统一从 /var/apps/hermes-studio symlink 反推。
+_resolve_trim_paths() {
+    local app_link="/var/apps/hermes-studio"
+    if { [ -z "${TRIM_APPDEST}" ] || [ ! -d "${TRIM_APPDEST}" ]; } && [ -e "${app_link}" ]; then
+        TRIM_APPDEST="$(readlink -f "${app_link}" 2>/dev/null)"
+    fi
+    if { [ -z "${TRIM_PKGHOME}" ] || [ ! -d "${TRIM_PKGHOME}" ]; } && [ -L "${app_link}/home" ]; then
+        TRIM_PKGHOME="$(readlink -f "${app_link}/home" 2>/dev/null)"
+    fi
+    if { [ -z "${TRIM_PKGVAR}" ] || [ ! -d "${TRIM_PKGVAR}" ]; } && [ -L "${app_link}/var" ]; then
+        TRIM_PKGVAR="$(readlink -f "${app_link}/var" 2>/dev/null)"
+    fi
+    if [ -z "${TRIM_PKGHOME}" ] && [ -n "${TRIM_APPDEST}" ]; then
+        local _ph; _ph="$(echo "${TRIM_APPDEST}" | sed 's|/@appcenter/|/@apphome/|')"
+        [ -d "${_ph}" ] && TRIM_PKGHOME="${_ph}"
+    fi
+    if [ -z "${TRIM_PKGVAR}" ] && [ -n "${TRIM_APPDEST}" ]; then
+        local _pv; _pv="$(echo "${TRIM_APPDEST}" | sed 's|/@appcenter/|/@appdata/|')"
+        [ -d "${_pv}" ] && TRIM_PKGVAR="${_pv}"
+    fi
+}
+_resolve_trim_paths
+
+
+if [ -x "${TRIM_APPDEST}/cmd/main" ]; then
+    "${TRIM_APPDEST}/cmd/main" stop 2>/dev/null || true
+fi
+
+clean_app_processes() {
+    local _pats=(
+        "${TRIM_PKGHOME}/data/node/lib/node_modules/hermes-web-ui"
+        "${TRIM_PKGHOME}/hermes-agent/venv/bin/hermes"
+    )
+    local pat
+    for pat in "${_pats[@]}"; do
+        [ -n "${pat}" ] || continue
+        pkill -TERM -f "${pat}" 2>/dev/null || true
+    done
+    sleep 2
+    for pat in "${_pats[@]}"; do
+        [ -n "${pat}" ] || continue
+        pkill -9 -f "${pat}" 2>/dev/null || true
+    done
+}
+clean_app_processes
+
+exit 0
