@@ -18,9 +18,13 @@ name: Build fnOS Ekko Studio FPK
 #      必需：auto-update 用 GITHUB_TOKEN 推送【不会】触发 push 事件
 #      （GitHub 防递归策略），只能靠 workflow_run 接力，这段配对了才叫「自动出包」。
 #
-# 构建方式：把 hermes-web-ui 的 node_modules（含编译好的原生 node-pty）作为
-# app/node 打进包（scripts/build-fpk.sh 的 ensure_node_bundle）。安装时
-# install_callback 走离线复制，几秒完成，不再依赖 fnOS 联网编译（fnOS 缺 gcc）。
+# ⚠️ workflow_run 会在 auto-update 【每次】完成后触发，包括「上下游版本一致、
+#    什么都没改」的那次。若不设条件，每 2 小时巡检都会白跑一次完整构建，并用
+#    overwrite 覆盖同名 Release 附件 —— 同一个版本号的包 sha256 每 2 小时变一次，
+#    核验产物时无法判断「手上这个包是不是当前发布的那个」。
+#    因此 job 上加 if 条件：只在「这次巡检确实产生了 bump 提交（head_sha 变了）」
+#    或非 workflow_run 触发时才构建。
+#    （不用 workflow_run.conclusion 判——巡检本身成功，只是没改动，结论是 success。）
 
 on:
   push:
@@ -44,7 +48,59 @@ env:
   MANIFEST_FILE: "manifest"
 
 jobs:
+  # ── 前置门禁：判断「这次到底要不要构建」 ──────────────────────────────────
+  # 为什么需要单独一个 job：workflow_run 会在 auto-update 【每次】完成后触发，
+  # 包括「上下游版本一致、什么都没改」的那次。若不拦，每 2 小时巡检都会白跑一次
+  # 完整构建，并用 overwrite 覆盖同名 Release 附件 —— 同一版本号的包 sha256
+  # 每 2 小时变一次，核验产物时无法判断「手上这个包是不是当前发布的那一个」。
+  #
+  # 判据用【本仓库的 Release 是否存在】当幂等键（技能里验证过的做法）：
+  #   - push / workflow_dispatch → 一律构建（手动触发就是明确要重建）
+  #   - workflow_run → 该版本已有 Release 就跳过；没有才构建
+  # 好处：既是幂等键，也是自愈键 —— 上次构建失败没留下 Release，下一轮自动重试。
+  #
+  # 注意不要用 `head_sha != head_branch` 之类的写法：head_branch 是分支【名】，
+  # 与 SHA 永不相等，条件恒真等于没拦（踩过）。
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+      version: ${{ steps.decide.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Decide whether to build
+        id: decide
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="$(grep '^version' manifest | awk -F'=' '{print $2}' | tr -d ' ')"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "manifest 版本: ${VERSION}   触发事件: ${{ github.event_name }}"
+
+          if [ "${{ github.event_name }}" != "workflow_run" ]; then
+            echo "非 workflow_run 触发（push / 手动）→ 构建"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 用本仓库 Release 当幂等键
+          CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 60 \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/v${VERSION}" || echo 000)"
+          if [ "$CODE" = "200" ]; then
+            echo "v${VERSION} 已有 Release → 上游无变化，跳过构建（避免每 2h 白跑并覆盖附件）"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "v${VERSION} 尚无 Release（HTTP ${CODE}）→ 需要构建"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
   build-fpk:
+    needs: gate
+    if: needs.gate.outputs.build == 'true'
     runs-on: ubuntu-latest
 
     steps:
