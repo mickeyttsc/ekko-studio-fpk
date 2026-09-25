@@ -13,13 +13,13 @@ resolve_pkg_home() {
     fi
     local v
     for v in 1 2 3 4 5 6 7 8; do
-        if [ -d "/vol${v}/@apphome/hermes-studio" ]; then
-            echo "/vol${v}/@apphome/hermes-studio"
+        if [ -d "/vol${v}/@apphome/ekko-studio" ]; then
+            echo "/vol${v}/@apphome/ekko-studio"
             return
         fi
     done
     # 全部卷都不存在时的最后兜底（正常不会走到：TRIM_PKGHOME 或探测应命中）
-    echo "/vol1/@apphome/hermes-studio"
+    echo "/vol1/@apphome/ekko-studio"
 }
 
 resolve_node_root() {

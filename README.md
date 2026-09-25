@@ -4,7 +4,7 @@
 
 - **上游**：`EKKOLearnAI/ekko-studio`（原 `EKKOLearnAI/hermes-studio`，同一仓库改名）
 - **产物**：`fnos-ekko-studio_v<version>.fpk`（滚动最新版为 `fnos-ekko-studio.fpk`）
-- **appname**：`hermes-studio`（技术标识，数据目录名 —— **故意不改**）
+- **appname**：`ekko-studio`（技术标识，数据目录名）
 - **display_name**：`Ekko Studio`（应用中心显示名）
 - **服务端口**：8648
 
@@ -12,8 +12,9 @@
 > 服务用户名、桌面启动项 ID）。改它等于换应用，当前实例会断且必须迁移数据。
 > 用户看到的名字由 `display_name` 控制。
 >
-> **产物文件名已从 `fnos-hermes-studio_*` 改为 `fnos-ekko-studio_*`**（2026-09-25）。
-> 这是纯文件名，与 appname 无关，不影响安装与升级。v0.7.24-6 及更早的包仍是旧名。
+> **历史**：本应用 appname 原为 `hermes-studio`，2026-09-25 改为 `ekko-studio`
+> （同步把产物名从 `fnos-hermes-studio_*` 改为 `fnos-ekko-studio_*`）。
+> 升级到新版需先迁移旧数据目录，否则新实例读不到会话/记忆/技能。
 
 ---
 

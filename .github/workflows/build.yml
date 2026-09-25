@@ -45,8 +45,8 @@ permissions:
 
 env:
   # 发布给用户的产物文件名前缀（fnos-ekko-studio_v<ver>.fpk）。
-  # ⚠️ 这不是 manifest 的 appname —— appname 仍是 hermes-studio（技术标识，
-  #    决定数据目录名/服务用户名），改它等于换应用。
+  # 与 manifest 的 appname 同值；若将来只想改发布名而不动技术标识，
+  # 这里独立改即可（build-fpk.sh 里 APPNAME/PKGNAME 已拆成两个变量）。
   APP_NAME: "ekko-studio"
   MANIFEST_FILE: "manifest"
 

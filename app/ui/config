@@ -1,6 +1,6 @@
 {
     ".url": {
-        "hermes-studio.Application": {
+        "ekko-studio.Application": {
             "title": "Ekko Studio",
             "icon": "images/icon_{0}.png",
             "type": "url",

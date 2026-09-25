@@ -5,14 +5,14 @@
 # install_init 在 fnOS 调用时，数据目录（@appdata）可能尚未挂载或创建。
 # 优先只写应用自己的日志文件；/var/log/apps 在部分系统上可能不可写，会导致
 # fnOS 把日志写入失败误判为安装失败。/tmp 作为最后兜底。
-LOG_FILE="${TRIM_PKGVAR:-/tmp/hermes-studio-var}/info.log"
-TMP_LOG_FILE="/tmp/hermes-studio-install-init.log"
+LOG_FILE="${TRIM_PKGVAR:-/tmp/ekko-studio-var}/info.log"
+TMP_LOG_FILE="/tmp/ekko-studio-install-init.log"
 
 # ── TRIM_* 自解析（不 hardcode 卷号）────────────────────────────────────────
 # fnOS 偶尔不传 TRIM_*，写死 /vol1 会让日志/状态检测落到不存在的卷，
-# 升级失败时零诊断信息。统一从 /var/apps/hermes-studio symlink 反推。
+# 升级失败时零诊断信息。统一从 /var/apps/ekko-studio symlink 反推。
 _resolve_trim_paths() {
-    local app_link="/var/apps/hermes-studio"
+    local app_link="/var/apps/ekko-studio"
     if { [ -z "${TRIM_APPDEST}" ] || [ ! -d "${TRIM_APPDEST}" ]; } && [ -e "${app_link}" ]; then
         TRIM_APPDEST="$(readlink -f "${app_link}" 2>/dev/null)"
     fi

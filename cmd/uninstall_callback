@@ -17,7 +17,7 @@
 # TRIM_* 自解析：卸载流程里 fnOS 偶尔不传。写死卷号在这里更危险 —— 可能什么都没删
 # 却返回成功，用户以为已清干净。解析失败时破坏性删除一律拒绝执行。
 _resolve_trim_paths() {
-    local app_link="/var/apps/hermes-studio"
+    local app_link="/var/apps/ekko-studio"
     if { [ -z "${TRIM_APPDEST}" ] || [ ! -d "${TRIM_APPDEST}" ]; } && [ -e "${app_link}" ]; then
         TRIM_APPDEST="$(readlink -f "${app_link}" 2>/dev/null)"
     fi
@@ -45,12 +45,12 @@ safe_rm_appdir() {
     local target="$1"
     [ -n "${target}" ] || return 1
     case "${target}" in
-        /vol[0-9]*/@apphome/hermes-studio|\
-        /vol[0-9]*/@appdata/hermes-studio|\
-        /vol[0-9]*/@appcenter/hermes-studio|\
-        /vol[0-9]*/@apptemp/hermes-studio|\
-        /vol[0-9]*/@appmeta/hermes-studio|\
-        /vol[0-9]*/@appconf/hermes-studio)
+        /vol[0-9]*/@apphome/ekko-studio|\
+        /vol[0-9]*/@appdata/ekko-studio|\
+        /vol[0-9]*/@appcenter/ekko-studio|\
+        /vol[0-9]*/@apptemp/ekko-studio|\
+        /vol[0-9]*/@appmeta/ekko-studio|\
+        /vol[0-9]*/@appconf/ekko-studio)
             rm -rf "${target}"
             return $?
             ;;

@@ -9,11 +9,11 @@ TRIM_APPDEST="${TRIM_APPDEST:-}"
 TRIM_PKGHOME="${TRIM_PKGHOME:-}"
 TRIM_PKGVAR="${TRIM_PKGVAR:-}"
 
-# 如果 fnOS 没有传入 TRIM_* 路径，则从 /var/apps/hermes-studio 的 symlink 自动推导。
+# 如果 fnOS 没有传入 TRIM_* 路径，则从 /var/apps/ekko-studio 的 symlink 自动推导。
 # 不同机器数据卷可能是 /vol1 /vol2 /vol3 /vol4，hardcode /vol1 会让状态检测找错路径
 # （v0.6.38-1 曾实测 254 上 cmd/main 仍残留 /vol1 默认值，若 TRIM_* 未传会找错卷）。
 _resolve_trim_paths() {
-    local app_link="/var/apps/hermes-studio"
+    local app_link="/var/apps/ekko-studio"
     # 仅当 TRIM_* 为空 或 指向的目录不存在（例如升级残留错误路径）时，才用 symlink 解析
     if { [ -z "${TRIM_APPDEST}" ] || [ ! -d "${TRIM_APPDEST}" ]; } && [ -e "${app_link}" ]; then
         TRIM_APPDEST="$(readlink -f "${app_link}" 2>/dev/null)"
@@ -42,7 +42,7 @@ _resolve_trim_paths
 if [ -z "${TRIM_APPDEST}" ] || [ ! -d "${TRIM_APPDEST}" ] \
    || [ -z "${TRIM_PKGHOME}" ] || [ ! -d "${TRIM_PKGHOME}" ]; then
     echo "ERROR: cannot resolve TRIM_APPDEST/TRIM_PKGHOME (APPDEST='${TRIM_APPDEST}' PKGHOME='${TRIM_PKGHOME}')" >&2
-    echo "ERROR: cannot resolve TRIM_APPDEST/TRIM_PKGHOME (APPDEST='${TRIM_APPDEST}' PKGHOME='${TRIM_PKGHOME}')" >> /tmp/hermes-studio-main.err 2>/dev/null || true
+    echo "ERROR: cannot resolve TRIM_APPDEST/TRIM_PKGHOME (APPDEST='${TRIM_APPDEST}' PKGHOME='${TRIM_PKGHOME}')" >> /tmp/ekko-studio-main.err 2>/dev/null || true
     exit 1
 fi
 TRIM_PKGVAR="${TRIM_PKGVAR:-$(echo "${TRIM_APPDEST}" | sed 's|/@appcenter/|/@appdata/|')}"
@@ -50,7 +50,7 @@ TRIM_PKGVAR="${TRIM_PKGVAR:-$(echo "${TRIM_APPDEST}" | sed 's|/@appcenter/|/@app
 DATA_DIR="${TRIM_PKGHOME}/data"
 NODE_PREFIX="${DATA_DIR}/node"
 HERMES_BIN="${NODE_PREFIX}/lib/node_modules/hermes-web-ui/bin/hermes-web-ui.mjs"
-LOG_FILE="${TRIM_PKGVAR:-/tmp/hermes-studio-var}/info.log"
+LOG_FILE="${TRIM_PKGVAR:-/tmp/ekko-studio-var}/info.log"
 WEB_UI_HOME="${DATA_DIR}"
 PORT="${wizard_port:-${HERMES_PORT:-8648}}"
 # 端口来自安装向导（wizard_port）或环境变量，视为不可信输入：
@@ -298,7 +298,7 @@ WD_EOF
 # 修复 Hermes Agent / HOME 目录属主。cmd/main 通常以 root 运行（或被 fnOS 以特权启动），
 # 而 install_callback 可能以当前登录用户运行，导致后台 install.sh 创建的文件属主错误。
 fix_agent_permissions() {
-    local app_user="${TRIM_USERNAME:-hermes-studio}"
+    local app_user="${TRIM_USERNAME:-ekko-studio}"
     # 仅在 root 权限下执行 chown，避免普通用户运行时报错
     if [ "$(id -u)" -ne 0 ]; then
         return 0

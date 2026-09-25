@@ -18,7 +18,7 @@ TRIM_PKGVAR="${TRIM_PKGVAR:-}"
 
 # TRIM_* 自解析（fnOS 偶尔不传）
 _resolve_trim_paths() {
-    local app_link="/var/apps/hermes-studio"
+    local app_link="/var/apps/ekko-studio"
     if { [ -z "${TRIM_APPDEST}" ] || [ ! -d "${TRIM_APPDEST}" ]; } && [ -e "${app_link}" ]; then
         TRIM_APPDEST="$(readlink -f "${app_link}" 2>/dev/null)"
     fi
@@ -32,7 +32,7 @@ _resolve_trim_paths() {
 }
 _resolve_trim_paths
 
-LOG_FILE="${TRIM_PKGVAR:-/tmp/hermes-studio-var}/info.log"
+LOG_FILE="${TRIM_PKGVAR:-/tmp/ekko-studio-var}/info.log"
 mkdir -p "$(dirname "${LOG_FILE}")" 2>/dev/null || true
 
 log_msg() {

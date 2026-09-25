@@ -10,9 +10,9 @@ TRIM_PKGVAR="${TRIM_PKGVAR:-}"
 
 # ── TRIM_* 自解析（不 hardcode 卷号）────────────────────────────────────────
 # fnOS 偶尔不传 TRIM_*，写死 /vol1 会让日志/状态检测落到不存在的卷，
-# 升级失败时零诊断信息。统一从 /var/apps/hermes-studio symlink 反推。
+# 升级失败时零诊断信息。统一从 /var/apps/ekko-studio symlink 反推。
 _resolve_trim_paths() {
-    local app_link="/var/apps/hermes-studio"
+    local app_link="/var/apps/ekko-studio"
     if { [ -z "${TRIM_APPDEST}" ] || [ ! -d "${TRIM_APPDEST}" ]; } && [ -e "${app_link}" ]; then
         TRIM_APPDEST="$(readlink -f "${app_link}" 2>/dev/null)"
     fi
