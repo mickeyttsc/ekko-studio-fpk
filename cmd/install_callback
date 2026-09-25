@@ -15,7 +15,7 @@
 # 关键步骤（复制文件、写入 marker 等）显式检查并退出；其余容错继续。
 
 # TRIM_PKGVAR 在部分安装流程（如升级回退）中可能为空，务必兜底到 /tmp
-LOG_FILE="${TRIM_PKGVAR:-/tmp/ekko-studio-var}/info.log"
+LOG_FILE="${TRIM_PKGVAR:-/tmp/hermes-studio-var}/info.log"
 
 # 确保日志目录存在（install_init 阶段 TRIM_PKGVAR 可能尚未创建）
 mkdir -p "$(dirname "${LOG_FILE}")" 2>/dev/null || true
@@ -27,7 +27,7 @@ log_msg() {
 }
 
 toast_err() {
-    echo "$*" > "${TRIM_TEMP_LOGFILE:-/tmp/ekko-studio-install.err}"
+    echo "$*" > "${TRIM_TEMP_LOGFILE:-/tmp/hermes-studio-install.err}"
 }
 
 trap 'toast_err "安装脚本第 ${LINENO} 行出错: $(tail -5 "${SYS_LOG_FILE}" "${LOG_FILE}" 2>/dev/null)"' ERR
@@ -436,7 +436,7 @@ OFFLINE_SRC_FLAG="${OFFLINE_SRC_FLAG}"
 LOG_FILE="${HERMES_HOME}/install-agent.log"
 MARKER="${HERMES_HOME}/.install-agent.marker"
 PID_FILE="${HERMES_HOME}/.install-agent.pid"
-APP_USER="${TRIM_USERNAME:-ekko-studio}"
+APP_USER="${TRIM_USERNAME:-hermes-studio}"
 
 fail() {
     echo "ERROR: \$1" | tee -a "\${LOG_FILE}" >&2
@@ -716,19 +716,19 @@ configure_weixin_policy
 # ---------------------------------------------------------------------------
 # 6. 双保险：修正外层生命周期 cmd/main 的 HERMES_BIN 路径
 # ---------------------------------------------------------------------------
-# fnOS 在升级安装时偶尔不会覆盖 /var/apps/ekko-studio/cmd/main。
+# fnOS 在升级安装时偶尔不会覆盖 /var/apps/hermes-studio/cmd/main。
 # 旧 cmd/main 调用 data/node/bin/hermes-web-ui（Windows 打包后被展平
 # 的真实文件），会按 ../package.json 找不到包根目录而启动失败。
 # 这里强制把 cmd/main 中的 HERMES_BIN 改为真实 mjs 入口。
 #
-# v0.6.38-2 说明：新版 cmd/main 已内置 TRIM_* 动态解析（优先 /var/apps/ekko-studio
+# v0.6.38-2 说明：新版 cmd/main 已内置 TRIM_* 动态解析（优先 /var/apps/hermes-studio
 # symlink，且校验目录存在性，不再 hardcode /vol1），因此不再对 cmd/main 做
 # TRIM_* sed 替换——旧实现曾因 upgrade 流程中 /var/apps 文件在回调后才被覆盖、
 # 或 sed 匹配失败，导致 /vol1 默认值残留（254 实测）。此处仅保留 HERMES_BIN
 # 修复（兼容旧版 cmd/main 残留），TRIM 路径交给 cmd/main 自解析。
 fix_main_script() {
     local main_script expected_bin
-    main_script="/var/apps/ekko-studio/cmd/main"
+    main_script="/var/apps/hermes-studio/cmd/main"
     expected_bin="${NODE_PREFIX}/lib/node_modules/hermes-web-ui/bin/hermes-web-ui.mjs"
 
     [ -f "${main_script}" ] || return 0
@@ -750,12 +750,12 @@ fix_main_script() {
 
     # 同时替换 TRIM_* 兜底路径中的 /vol1，避免状态检测找错卷。
     # ⛔ 必须先判非空：fnOS 偶尔不传 TRIM_APPDEST，空值注入 sed 会把
-    #    /vol2/@appcenter/ekko-studio/bin/x 替换成 /bin/x，直接写坏
+    #    /vol2/@appcenter/hermes-studio/bin/x 替换成 /bin/x，直接写坏
     #    正在使用的 cmd/main（已实证）。空值时整体跳过。
     if [ -n "${TRIM_APPDEST}" ] && [ -n "${TRIM_PKGHOME}" ] && [ -n "${TRIM_PKGVAR}" ]; then
-        sed -i -E "s|/vol[0-9]+/@appcenter/ekko-studio|${TRIM_APPDEST}|g" "${main_script}" 2>/dev/null || true
-        sed -i -E "s|/vol[0-9]+/@apphome/ekko-studio|${TRIM_PKGHOME}|g" "${main_script}" 2>/dev/null || true
-        sed -i -E "s|/vol[0-9]+/@appdata/ekko-studio|${TRIM_PKGVAR}|g" "${main_script}" 2>/dev/null || true
+        sed -i -E "s|/vol[0-9]+/@appcenter/hermes-studio|${TRIM_APPDEST}|g" "${main_script}" 2>/dev/null || true
+        sed -i -E "s|/vol[0-9]+/@apphome/hermes-studio|${TRIM_PKGHOME}|g" "${main_script}" 2>/dev/null || true
+        sed -i -E "s|/vol[0-9]+/@appdata/hermes-studio|${TRIM_PKGVAR}|g" "${main_script}" 2>/dev/null || true
         log_msg "cmd/main TRIM fallback paths rewritten to resolved volumes"
     else
         log_msg "WARNING: TRIM_* incomplete (APPDEST='${TRIM_APPDEST}' PKGHOME='${TRIM_PKGHOME}' PKGVAR='${TRIM_PKGVAR}'), skipping cmd/main sed rewrite"

@@ -5,7 +5,7 @@
 
 set -e
 
-LOG_FILE="${TRIM_PKGVAR:-/tmp/ekko-studio-var}/info.log"
+LOG_FILE="${TRIM_PKGVAR:-/tmp/hermes-studio-var}/info.log"
 
 log_msg() {
     local msg="$(date '+%Y-%m-%d %H:%M:%S') - [upgrade] $1"
@@ -82,7 +82,7 @@ if [ ! -x "${NODE_BIN}" ]; then
 fi
 
 # 升级时 hermes-web-ui 若未安装/损坏，直接调用 install_callback 重新完整安装。
-# upgrade_callback 与 install_callback 位于同一目录 /var/apps/ekko-studio/cmd/。
+# upgrade_callback 与 install_callback 位于同一目录 /var/apps/hermes-studio/cmd/。
 run_install_callback() {
     local cb
     cb="$(cd "$(dirname "$0")" && pwd)/install_callback"
@@ -90,7 +90,7 @@ run_install_callback() {
         log_msg "Falling back to install_callback: ${cb}"
         exec "${cb}"
     fi
-    cb="/var/apps/ekko-studio/cmd/install_callback"
+    cb="/var/apps/hermes-studio/cmd/install_callback"
     if [ -x "${cb}" ]; then
         log_msg "Falling back to install_callback: ${cb}"
         exec "${cb}"

@@ -3,7 +3,7 @@
 # 构建 Ekko Studio 飞牛 fpk 安装包
 #
 # 用法：
-#   bash scripts/build-fpk.sh            # 生成 ekko-studio.fpk（项目根目录）
+#   bash scripts/build-fpk.sh            # 生成 hermes-studio.fpk（项目根目录）
 #   bash scripts/build-fpk.sh dist       # 额外复制为 dist/fnos-ekko-studio_v<version>.fpk
 #
 # 构建方式（优先级）：
@@ -13,12 +13,11 @@
 #      在任意 Linux / macOS / Git Bash 均可运行，不依赖 fnpack。
 #
 # ⚠️ 两个名字不要混：
-#   APPNAME = manifest 里的 appname（技术标识，= fnpack 产出的 ekko-studio.fpk）
+#   APPNAME = manifest 里的 appname（技术标识，= fnpack 产出的 hermes-studio.fpk）
 #   PKGNAME = 发布给用户的文件名前缀（fnos-ekko-studio_v<ver>.fpk）
-# 当前两者同值；保留两个变量是为了将来「技术标识不变但改发布名」时不用再拆一次。
 set -e
 
-APPNAME="ekko-studio"
+APPNAME="hermes-studio"
 PKGNAME="ekko-studio"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
