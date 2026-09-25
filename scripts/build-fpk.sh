@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
-# 构建 hermes-studio 飞牛 fpk 安装包
+# 构建 Ekko Studio 飞牛 fpk 安装包
 #
 # 用法：
 #   bash scripts/build-fpk.sh            # 生成 hermes-studio.fpk（项目根目录）
-#   bash scripts/build-fpk.sh dist       # 额外复制为 dist/fnos-hermes-studio_v<version>.fpk
+#   bash scripts/build-fpk.sh dist       # 额外复制为 dist/fnos-ekko-studio_v<version>.fpk
 #
 # 构建方式（优先级）：
 #   1. 官方 fnpack（推荐）：自动探测 fnpack / fnpack.exe（含仓库根目录的 fnpack.exe）。
@@ -12,9 +12,13 @@
 #   2. 纯 tar+gzip 兜底（无 fnpack 时）：复刻官方双层 tar.gz 格式，可复现，
 #      在任意 Linux / macOS / Git Bash 均可运行，不依赖 fnpack。
 #
+# ⚠️ 两个名字不要混：
+#   APPNAME = manifest 里的 appname（技术标识，= fnpack 产出的 hermes-studio.fpk）
+#   PKGNAME = 发布给用户的文件名前缀（fnos-ekko-studio_v<ver>.fpk）
 set -e
 
 APPNAME="hermes-studio"
+PKGNAME="ekko-studio"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
@@ -632,8 +636,8 @@ PY
     postprocess_fpk "$SRC_FPK" "$SRC_FPK"
 
     if [ "$OUT_DIR" != "." ]; then
-        cp "$SRC_FPK" "${OUT_DIR}/fnos-${APPNAME}_v${VERSION}.fpk"
-        echo "已生成: ${OUT_DIR}/fnos-${APPNAME}_v${VERSION}.fpk"
+        cp "$SRC_FPK" "${OUT_DIR}/fnos-${PKGNAME}_v${VERSION}.fpk"
+        echo "已生成: ${OUT_DIR}/fnos-${PKGNAME}_v${VERSION}.fpk"
     fi
     # 取 checksum 供展示
     SUM="$(tar xzf "$SRC_FPK" -O manifest 2>/dev/null | grep '^checksum' | awk -F'= ' '{print $2}')"
@@ -689,7 +693,7 @@ postprocess_fpk "$TARGET" "$TARGET"
 
 # 7. 若指定了输出目录，重命名为带版本号的最终文件名
 if [ "$OUT_DIR" != "." ]; then
-    FINAL="${OUT_DIR}/fnos-${APPNAME}_v${VERSION}.fpk"
+    FINAL="${OUT_DIR}/fnos-${PKGNAME}_v${VERSION}.fpk"
     mv "$TARGET" "$FINAL"
     echo "已生成: $FINAL (checksum=${SUM})"
 else

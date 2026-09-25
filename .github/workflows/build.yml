@@ -44,7 +44,10 @@ permissions:
   contents: write
 
 env:
-  APP_NAME: "hermes-studio"
+  # 发布给用户的产物文件名前缀（fnos-ekko-studio_v<ver>.fpk）。
+  # ⚠️ 这不是 manifest 的 appname —— appname 仍是 hermes-studio（技术标识，
+  #    决定数据目录名/服务用户名），改它等于换应用。
+  APP_NAME: "ekko-studio"
   MANIFEST_FILE: "manifest"
 
 jobs:
@@ -349,8 +352,8 @@ jobs:
             - 提交：`${{ github.sha }}`
             - 生成时间：${{ github.event.head_commit.timestamp }}
 
-            > ⚠️ 这是滚动预发布版本，每次 push 到 main 会覆盖 `fnos-hermes-studio.fpk`。
-            > 固定版本请下载带版本号的附件 `fnos-hermes-studio_v${{ steps.target_version.outputs.target_version }}.fpk`。
+            > ⚠️ 这是滚动预发布版本，每次 push 到 main 会覆盖 `fnos-ekko-studio.fpk`。
+            > 固定版本请下载带版本号的附件 `fnos-ekko-studio_v${{ steps.target_version.outputs.target_version }}.fpk`。
 
       # 稳定版 Release：每次构建都发（tag = v<版本号>）。
       # 同名 asset 用 overwrite 覆盖 —— 注意因此「版本号没 bump 的重建会覆盖同名
@@ -377,7 +380,7 @@ jobs:
           2. 安装后首次启动会自动在后台安装 Hermes Agent（约 1-3 分钟），请稍候。
           3. 默认监听 8648 端口，点击应用图标在浏览器打开。
 
-          固定版本请从本 Release 附件下载 fnos-hermes-studio_v${{ steps.target_version.outputs.target_version }}.fpk；
+          固定版本请从本 Release 附件下载 fnos-ekko-studio_v${{ steps.target_version.outputs.target_version }}.fpk；
           最新滚动版见 Release latest。
           NOTE
           sed -i "s/__WEBUI__/${HERMES_WEBUI_VER}/; s/__AGENT__/${HERMES_AGENT_VER}/" /tmp/relnotes.md

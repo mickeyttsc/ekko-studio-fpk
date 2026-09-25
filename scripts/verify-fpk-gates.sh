@@ -212,6 +212,16 @@ for cb in install_callback upgrade_callback main; do
 done
 echo "✅ DSH 凭据保护在 install/upgrade/main 三处入口均存在"
 
+# 上游改名（hermes-studio -> ekko-studio）后新增了 ekko-studio-mcp / ekko-studio-web
+# 两个 bin 入口。若 fix_bundled_bin_links 又退回写死清单，走 bundled 离线复制路径时
+# 这些入口会缺失，MCP 配置里的命令就找不到 —— 必须从 package.json 动态读取。
+if ! grep -q 'package.json' "$TMP/cmd/install_callback" 2>/dev/null; then
+    echo "::error:: install_callback 的 fix_bundled_bin_links 未从 package.json 读取 bin 字段，"
+    echo "         上游新增 bin 入口时离线复制路径会漏建软链，构建中止"
+    exit 1
+fi
+echo "✅ bin 入口按 package.json 动态重建（上游改名/新增入口不会漏）"
+
 # ── 反自检：确保上面的门禁真的会拦 ──
 # 所有检查都依赖 grep 的返回值。若有人改回 `echo "$BIG" | grep -q ...`，
 # SIGPIPE 会让检查静默失效（命中也会被判成未命中）。这里断言「已知存在的

@@ -100,36 +100,60 @@ resolve_node_root() {
 
 # 重建 npm prefix/bin 符号链接。bundled node 在 Windows 环境打包时 symlink 会被
 # 展平为真实文件，导致 hermes-web-ui bin 脚本按 ../package.json 找不到包根目录。
+#
+# ⚠️ 入口清单必须从 package.json 的 bin 字段动态取，不能写死 —— 上游改名后
+#    （hermes-studio -> ekko-studio）新增了 ekko-studio-mcp / ekko-studio-web，
+#    写死清单只在 npm install 路径下才碰巧正确（npm 按 package.json 自动建），
+#    走 bundled 离线复制路径时 ekko-* 入口会全部缺失，MCP 配置指向的命令找不到。
 fix_bundled_bin_links() {
-    local pkg_dir lib_bin_dir bin_dir rel
+    local pkg_dir bin_dir rel pkg_json
     pkg_dir="${NODE_PREFIX}/lib/node_modules/hermes-web-ui"
     bin_dir="${NODE_PREFIX}/bin"
+    pkg_json="${pkg_dir}/package.json"
     [ -d "${pkg_dir}/bin" ] || return 0
 
     # 从 prefix/bin 到 prefix/lib/node_modules/hermes-web-ui/bin 的相对路径
     rel="../lib/node_modules/hermes-web-ui/bin"
 
-    # hermes-web-ui
-    if [ -f "${pkg_dir}/bin/hermes-web-ui.mjs" ]; then
-        rm -f "${bin_dir}/hermes-web-ui"
-        ln -s "${rel}/hermes-web-ui.mjs" "${bin_dir}/hermes-web-ui" 2>/dev/null || \
-            cp -a "${pkg_dir}/bin/hermes-web-ui.mjs" "${bin_dir}/hermes-web-ui"
-        chmod +x "${bin_dir}/hermes-web-ui" 2>/dev/null || true
+    # 取 package.json 的 bin 映射："<命令名> <目标文件>"，每行一条。
+    # python3 在 fnOS 上可能不存在 → 回退到已知入口清单（含新旧两套名字）。
+    local entries
+    if [ -f "${pkg_json}" ] && command -v python3 >/dev/null 2>&1; then
+        entries="$(python3 -c '
+import json, sys
+try:
+    b = json.load(open(sys.argv[1])).get("bin") or {}
+except Exception:
+    sys.exit(1)
+if isinstance(b, str):
+    b = {"hermes-web-ui": b}
+for name, target in b.items():
+    t = str(target).lstrip("./")
+    if t.startswith("bin/"):
+        print(name, t[len("bin/"):])
+' "${pkg_json}" 2>/dev/null)" || entries=""
     fi
-    # hermes-web-ui-mcp
-    if [ -f "${pkg_dir}/bin/hermes-web-ui-mcp.mjs" ]; then
-        rm -f "${bin_dir}/hermes-web-ui-mcp"
-        ln -s "${rel}/hermes-web-ui-mcp.mjs" "${bin_dir}/hermes-web-ui-mcp" 2>/dev/null || \
-            cp -a "${pkg_dir}/bin/hermes-web-ui-mcp.mjs" "${bin_dir}/hermes-web-ui-mcp"
-        chmod +x "${bin_dir}/hermes-web-ui-mcp" 2>/dev/null || true
+
+    if [ -z "${entries}" ]; then
+        entries="hermes-web-ui hermes-web-ui.mjs
+hermes-web-ui-mcp hermes-web-ui-mcp.mjs
+hermes-studio-mcp hermes-studio-mcp.mjs
+ekko-studio-mcp ekko-studio-mcp.mjs
+ekko-studio-web hermes-web-ui.mjs"
+        log_msg "WARNING: 无法从 package.json 读取 bin 字段，使用内置回退入口清单"
     fi
-    # hermes-studio-mcp
-    if [ -f "${pkg_dir}/bin/hermes-studio-mcp.mjs" ]; then
-        rm -f "${bin_dir}/hermes-studio-mcp"
-        ln -s "${rel}/hermes-studio-mcp.mjs" "${bin_dir}/hermes-studio-mcp" 2>/dev/null || \
-            cp -a "${pkg_dir}/bin/hermes-studio-mcp.mjs" "${bin_dir}/hermes-studio-mcp"
-        chmod +x "${bin_dir}/hermes-studio-mcp" 2>/dev/null || true
-    fi
+
+    local name target
+    while read -r name target; do
+        [ -n "${name}" ] && [ -n "${target}" ] || continue
+        [ -f "${pkg_dir}/bin/${target}" ] || continue
+        rm -f "${bin_dir}/${name}"
+        ln -s "${rel}/${target}" "${bin_dir}/${name}" 2>/dev/null || \
+            cp -a "${pkg_dir}/bin/${target}" "${bin_dir}/${name}"
+        chmod +x "${bin_dir}/${name}" 2>/dev/null || true
+    done <<EOF
+${entries}
+EOF
 }
 
 NODE_ROOT="$(resolve_node_root)"

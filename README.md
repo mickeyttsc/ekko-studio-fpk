@@ -3,14 +3,17 @@
 跟随上游 [EKKOLearnAI/ekko-studio](https://github.com/EKKOLearnAI/ekko-studio) 自动打包飞牛 fnOS 的 **FPK** 安装包。
 
 - **上游**：`EKKOLearnAI/ekko-studio`（原 `EKKOLearnAI/hermes-studio`，同一仓库改名）
-- **产物**：`fnos-hermes-studio_v<version>.fpk`
-- **appname**：`hermes-studio`（技术标识，数据目录名）
+- **产物**：`fnos-ekko-studio_v<version>.fpk`（滚动最新版为 `fnos-ekko-studio.fpk`）
+- **appname**：`hermes-studio`（技术标识，数据目录名 —— **故意不改**）
 - **display_name**：`Ekko Studio`（应用中心显示名）
 - **服务端口**：8648
 
 > `appname` 是给系统认的技术标识（决定 `@apphome/@appconf/@appdata` 三个数据目录名、
 > 服务用户名、桌面启动项 ID）。改它等于换应用，当前实例会断且必须迁移数据。
 > 用户看到的名字由 `display_name` 控制。
+>
+> **产物文件名已从 `fnos-hermes-studio_*` 改为 `fnos-ekko-studio_*`**（2026-09-25）。
+> 这是纯文件名，与 appname 无关，不影响安装与升级。v0.7.24-6 及更早的包仍是旧名。
 
 ---
 
@@ -55,12 +58,12 @@ curl -s -H "Authorization: Bearer $TOK" \
 
 ```bash
 # 滚动最新版
-curl -fL -o fnos-hermes-studio.fpk \
-  https://github.com/mickeyttsc/ekko-studio-fpk/releases/download/latest/fnos-hermes-studio.fpk
+curl -fL -o fnos-ekko-studio.fpk \
+  https://github.com/mickeyttsc/ekko-studio-fpk/releases/download/latest/fnos-ekko-studio.fpk
 
 # 固定版本
-curl -fL -o fnos-hermes-studio_v0.7.24-6.fpk \
-  https://github.com/mickeyttsc/ekko-studio-fpk/releases/download/v0.7.24-6/fnos-hermes-studio_v0.7.24-6.fpk
+curl -fL -o fnos-ekko-studio_v0.7.24-6.fpk \
+  https://github.com/mickeyttsc/ekko-studio-fpk/releases/download/v0.7.24-6/fnos-ekko-studio_v0.7.24-6.fpk
 ```
 
 ---
@@ -110,7 +113,7 @@ tar -czf app.tgz app                     # ❌ 多一层 app/，装完路径全�
 ```bash
 export PATH="/var/apps/nodejs_v24/target/bin:$PATH"
 bash scripts/build-fpk.sh dist
-# 产物: dist/fnos-hermes-studio_v<version>.fpk
+# 产物: dist/fnos-ekko-studio_v<version>.fpk
 ```
 
 构建需要联网（下载上游产物 + Agent 离线源码）。首次构建会下载约 130MB 的
@@ -124,7 +127,7 @@ web-ui 预构建产物，并编译/镜像 Agent 的 node 依赖。
 
 ```bash
 # 双层内容校验（外层条目 + 内层 app.tgz）
-bash scripts/verify-fpk-content.sh dist/fnos-hermes-studio_v0.7.24-6.fpk
+bash scripts/verify-fpk-content.sh dist/fnos-ekko-studio_v0.7.24-6.fpk
 
 # 上游探测逻辑（可脱离 CI 单独跑）
 export GITHUB_TOKEN=$(cat ~/.config/github/token)
@@ -137,7 +140,7 @@ python3 scripts/validate-gh-workflows.py .github/workflows
 
 # 回读 Release 附件（验收标准：附件存在且能下载，不是 workflow 显示 success）
 GITHUB_REPOSITORY=mickeyttsc/ekko-studio-fpk GITHUB_TOKEN=$TOK \
-  python3 scripts/verify-release-asset.py v0.7.24-6 dist/fnos-hermes-studio_v0.7.24-6.fpk
+  python3 scripts/verify-release-asset.py v0.7.24-6 dist/fnos-ekko-studio_v0.7.24-6.fpk
 ```
 
 ### 验收清单

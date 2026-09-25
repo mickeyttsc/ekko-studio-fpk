@@ -2,6 +2,7 @@
 # GitHub 拒绝 >100MB 文件，且以下产物不应进入 git（由 CI / 本地构建生成）。
 dist/
 *.fpk
+fnos-ekko-studio*.fpk
 fnos-hermes-studio*.fpk
 # bundled hermes-web-ui node_modules，本地构建时存在，不入库
 app/node/
