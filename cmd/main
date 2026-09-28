@@ -155,6 +155,16 @@ export HERMES_HOME="${HERMES_HOME}"
 export HERMES_WEB_UI_HOME="${WEB_UI_HOME}"
 export HOME="${WEB_UI_HOME}"
 
+# CORS / Socket.IO Origin 白名单。
+# 上游默认按「Origin 必须与 Host 严格相等」校验 WebSocket 升级请求（server/index.js 的
+# $Ne/c5n：new URL(origin).host === host）。任何把端口剥掉或改写 Host 的入口都会导致不相等：
+#   · Lucky 反代（studio.ttao.me:1996）→ 后端 Host 可能不含端口
+#   · fnOS FN Connect 远程中继 → origin=office.app.5ddd.com:<随机端口>，host=内网地址
+# 命中即被拒：[Socket.IO] rejected upgrade origin → WebSocket 连不上（页面能开、对话不流式）。
+# 远程中继端口每次随机，无法用固定清单覆盖，故用 *（与上游 enableClientMode() 同款做法）。
+# 可用环境变量覆盖以收紧：CORS_ORIGINS='https://studio.ttao.me:1996 http://192.168.124.5:8648'
+export CORS_ORIGINS="${CORS_ORIGINS:-*}"
+
 # ---------------------------------------------------------------------------
 # Hermes Agent 后台安装：非阻塞触发（v0.6.38-2 核心修复）
 # ---------------------------------------------------------------------------
