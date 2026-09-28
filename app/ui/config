@@ -4,7 +4,7 @@
             "title": "Ekko Studio",
             "icon": "images/icon_{0}.png",
             "type": "url",
-            "protocol": "",
+            "protocol": "http",
             "port": "${wizard_port}",
             "url": "/",
             "allUsers": false,
