@@ -65,6 +65,19 @@ echo "✅ cmd/* 均可执行"
 # 解外层，再对磁盘上的 app.tgz 做 tar tzf（不要用管道版本，容易拿到空输入而误判）
 tar xzf "$FPK" -C "$TMP"
 [ -s "$TMP/app.tgz" ] || { echo "::error:: 解出的 app.tgz 缺失或为空"; exit 1; }
+
+# cmd/main 必须注入 CORS_ORIGINS：
+# 上游按「Origin.host 必须 === Host」校验 Socket.IO 升级（server 的 $Ne/c5n），
+# 默认 same host only。任何改写 Host 或换端口的入口都会不相等而被拒：
+#   · Lucky 等反代剥掉端口   · fnOS FN Connect 中继用随机端口
+# 命中即 [Socket.IO] rejected upgrade origin → 页面能开但对话不流式。
+# 远程中继端口每次随机，固定清单覆盖不了，故取 *（与上游 enableClientMode() 同款）。
+# 注意：web-ui 不加载 .env（无 dotenv/loadEnvFile），cmd/main 的 export 是唯一注入点。
+if ! grep -vE '^[[:space:]]*#' "$TMP/cmd/main" | grep -q 'CORS_ORIGINS'; then
+    echo "::error:: cmd/main 未注入 CORS_ORIGINS —— 反代/FN Connect 中继下 Socket.IO 会被拒（页面能开、对话不流式）"
+    exit 1
+fi
+echo "✅ cmd/main 已注入 CORS_ORIGINS（反代与远程中继下 WebSocket 可用）"
 tar tzf "$TMP/app.tgz" > "$TMP/inner.list"
 echo "内层条目数: $(wc -l < "$TMP/inner.list")"
 
@@ -105,6 +118,37 @@ if ! grep -q '\${wizard_port}' "$TMP/ui/config"; then
     exit 1
 fi
 echo "✅ ui/config 端口使用 \${wizard_port}（可在应用设置中修改）"
+
+# ui/config 的 protocol 必须是非空 http/https：
+# 留空会让 fnOS 渲染出入口 url = "://${host}:<port>/"（协议头缺失），
+# 客户端只能自己猜协议 —— 猜成 HTTPS 就会用 TLS 打明文 HTTP 端口，
+# 手机 App 报 HandshakeException: WRONG_VERSION_NUMBER(tls_record.cc:127)。
+# 官方第三方应用（Lucky/1Panel/Sun-Panel/Home-Assistant/lemon-music/miair-next）
+# 凡指定了 port 的一律显式写 "http"；protocol 为空只出现在「无 port、走路径路由」的应用上。
+if ! python3 - "$TMP/ui/config" <<'PY'
+import json, sys
+try:
+    cfg = json.load(open(sys.argv[1], encoding='utf-8'))
+except Exception as e:
+    print(f"ui/config 不是合法 JSON: {e}", file=sys.stderr); sys.exit(1)
+urls = cfg.get('.url') or {}
+if not urls:
+    print("ui/config 缺 .url 段", file=sys.stderr); sys.exit(1)
+for name, item in urls.items():
+    proto = (item or {}).get('protocol')
+    if proto not in ('http', 'https'):
+        print(f"{name}: protocol={proto!r}（必须显式写 'http' 或 'https'）", file=sys.stderr)
+        sys.exit(1)
+    # 指定了 port 却不带协议头 = 客户端必然猜错协议
+    if (item or {}).get('port') and proto not in ('http', 'https'):
+        sys.exit(1)
+sys.exit(0)
+PY
+then
+    echo "::error:: ui/config 的 protocol 必须显式写 'http'（留空会导致入口 url 变成 ://host:port/ ，客户端猜成 HTTPS 打明文端口）"
+    exit 1
+fi
+echo "✅ ui/config protocol 显式声明（入口 url 协议头完整）"
 
 # 三个向导文件必须存在且是合法 JSON（安装/卸载/配置界面的全部内容都在这）
 for w in install uninstall config; do
