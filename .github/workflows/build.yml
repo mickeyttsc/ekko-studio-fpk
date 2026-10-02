@@ -43,6 +43,14 @@ on:
 permissions:
   contents: write
 
+# 上游巡检加密到 5 分钟后，本 workflow 会频繁被 workflow_run 唤醒。
+# 虽然 gate job 用「本仓是否已有该版本 Release」当幂等键、无变化就跳过构建，
+# 但仍要防止两次「确实需要构建」的运行并发覆盖同一个 Release 附件。
+# 排队而不取消：被取消的那次可能正是唯一能产出新包的那次。
+concurrency:
+  group: build-fpk-${{ github.event.workflow_run.head_sha || github.sha }}
+  cancel-in-progress: false
+
 env:
   # 发布给用户的产物文件名前缀（fnos-ekko-studio_v<ver>.fpk）。
   # ⚠️ 这不是 manifest 的 appname —— appname 仍是 hermes-studio（技术标识，
