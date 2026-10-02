@@ -47,8 +47,12 @@ name: Auto-update upstream versions
 
 on:
   schedule:
-    # 只负责「点火」。真正的检查由长驻 job 内部循环完成，故无需高频 cron。
-    - cron: '*/5 * * * *'
+    # 兜底点火：正常情况由长驻 job 自己点火下一棒（自续跑），不依赖 cron。
+    # 这里保留每小时一次，仅用于「链条意外断开」时自动重启。
+    # ⚠️ 不要设成 */5：GitHub 每个 concurrency group 只允许 1 个 running + 1 个
+    #    pending，高频 cron 会把 pending 槽位反复挤掉（表现为大量 cancelled run），
+    #    虽不影响功能但噪音很大。自续跑已保证连续覆盖。
+    - cron: '0 * * * *'
   workflow_dispatch:
     inputs:
       single_tick:
@@ -98,8 +102,30 @@ jobs:
           fi
 
           TICK_INTERVAL=300          # 每 5 分钟巡检一次
-          JOB_SECONDS=20400          # 5h40m（留足余量给 6h 上限）
+          JOB_SECONDS=19800          # 5h30m（留足余量：job 上限 6h + 下一棒启动时间）
           START=$(date +%s)
+
+          # ── 自续跑：退出前先点火下一棒 ──────────────────────────────────
+          # 让链路【不依赖 cron】：本 job 结束前主动 dispatch 下一次自己，
+          # 下一棒因 concurrency 排队，本 job 一退出就立刻接管 → 无缝连续覆盖。
+          # 于是 cron 降级为「链条意外断开时的兜底重启」，而非主驱动。
+          # ⚠️ 必须在「还在跑」时点火（退出后进程已结束，无法再发请求）。
+          arm_next() {
+            if [ -z "${GITHUB_TOKEN:-}" ] || [ -z "${GITHUB_REPOSITORY:-}" ]; then
+              echo "本地模式：跳过自续跑"
+              return 0
+            fi
+            CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 60 -X POST \
+              -H "Authorization: token ${GITHUB_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/auto-update.yml/dispatches" \
+              -d '{"ref":"main"}' 2>/dev/null || echo 000)"
+            if [ "${CODE}" = "204" ]; then
+              echo "✅ 已点火下一棒（自续跑，HTTP 204）"
+            else
+              echo "WARN 自续跑点火失败 HTTP ${CODE}（将由每小时 cron 兜底重启）"
+            fi
+          }
 
           echo "长驻轮询启动：每 ${TICK_INTERVAL}s 巡检一次，最长 ${JOB_SECONDS}s"
           echo "起止：$(date -u '+%H:%M:%S')Z 起"
@@ -113,7 +139,8 @@ jobs:
             NOW=$(date +%s)
             ELAPSED=$((NOW - START))
             if [ "${ELAPSED}" -ge "${JOB_SECONDS}" ]; then
-              echo "已达本次 job 时限（${ELAPSED}s），正常退出，等待下一次 cron 无缝接管"
+              echo "已达本次 job 时限（${ELAPSED}s），点火下一棒后正常退出"
+              arm_next
               break
             fi
             sleep "${TICK_INTERVAL}"
