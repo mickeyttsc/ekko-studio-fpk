@@ -152,6 +152,15 @@ if ! mkdir "\$LOCK" 2>/dev/null; then exit 0; fi
 trap 'rmdir "\$LOCK" 2>/dev/null' EXIT
 
 export HERMES_HOME="\$HERMES_HOME_DIR"
+# ⛔ 必须显式设置 HOME：crond 会把 HOME 设成 crontab 属主的 passwd 家目录
+#    （hermes-studio → /home/hermes-studio）。该目录不存在、父目录 /home 为 root:755，
+#    内核在 HOME 下解析 gateway 锁目录（~/.local/state/hermes/gateway-locks）会 EACCES，
+#    症状是 gateway 起来了但 Telegram 适配器无限重连（每 5 分钟一次）：
+#      [Telegram] Failed to connect to Telegram: [Errno 13] Permission denied: '/home/hermes-studio'
+#    与 cmd/main 的 start 路径一致：HOME = \${TRIM_PKGHOME}/data。
+export HOME="${DATA_DIR}"
+export USER="hermes-studio"
+export LOGNAME="hermes-studio"
 export PATH="\$(dirname "\$HERMES_BIN"):/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin"
 
 [ -x "\$HERMES_BIN" ] || { log "HERMES_BIN 不存在，跳过（等待安装完成）"; exit 0; }
