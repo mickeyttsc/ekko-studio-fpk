@@ -65,6 +65,286 @@ HERMES_HOME="${TRIM_PKGHOME}/hermes-home"
 
 log_msg() { echo "$(date '+%Y-%m-%d %H:%M:%S') - [main] $1" >> "${LOG_FILE}" 2>/dev/null || true; }
 
+# ── Gateway 存活保障（随应用自带，升级后自动重建）─────────────────────────────
+# 背景（2026-10-02 实测，停摆 21 小时无人察觉）：
+#   ① fnOS 应用升级会杀掉 gateway 但不重启它 —— cmd/upgrade_init 的
+#      clean_app_processes() 明确 `pkill -TERM/-9 -f "${TRIM_PKGHOME}/hermes-agent/venv/bin/hermes"`，
+#      而 cmd/main 的 start_process 只启动 web-ui，全文件没有启动 gateway 的代码。
+#   ② web-ui 的 gateway-autostart 是唯一的补偿路径，但它的开关
+#      data/config.json 的 gatewayAutoStart.enabled 从未被写入过
+#      （web-ui 写配置是 {...existing, ...patch} 合并，不会补回缺失的键）。
+#   后果：升级后 gateway 不再起来 → hermes cron 与消息通道全停。
+# 修复分两道，都必须随包自带（手工装的会丢）：
+#   A. 写回 gatewayAutoStart 开关，让 web-ui 启动时自己拉起 gateway；
+#   B. 装系统级兜底守护 —— 用【系统 cron】而非 hermes cron：后者住在 gateway
+#      进程里，gateway 挂了它一起哑，无法守护自己。
+
+# A. 幂等写回 web-ui 的 gateway 自启动开关。
+#    只在键缺失时补写，不动用户已有的其它配置。
+ensure_gateway_autostart_config() {
+    local cfg="${DATA_DIR}/config.json"
+    local out
+    # python3 在 fnOS 上可能不存在（与 install_callback 同样加保护）；
+    # 缺失时跳过本道防线，兜底交给系统 cron 守护（纯 bash，不依赖 python）。
+    if ! command -v python3 >/dev/null 2>&1; then
+        log_msg "gatewayAutoStart: skip（无 python3，兜底交给系统 cron 守护）"
+        return 0
+    fi
+    out="$(python3 - "$cfg" <<'PYEOF' 2>&1
+import json, os, sys
+p = sys.argv[1]
+d = {}
+if os.path.exists(p):
+    try:
+        d = json.load(open(p, encoding="utf-8"))
+    except Exception as e:
+        print("skip: config.json 解析失败 %s" % e)
+        sys.exit(0)
+if not isinstance(d, dict):
+    print("skip: config.json 顶层不是对象")
+    sys.exit(0)
+cur = d.get("gatewayAutoStart")
+if isinstance(cur, dict) and cur.get("enabled") is True:
+    print("already enabled")
+    sys.exit(0)
+d["gatewayAutoStart"] = {"enabled": True, "management": "per_profile"}
+try:
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False, indent=2)
+    print("written")
+except Exception as e:
+    print("failed: %s" % e)
+PYEOF
+)"
+    log_msg "gatewayAutoStart: ${out}"
+}
+
+# B. 生成守护脚本并装进系统 cron。幂等：重复调用只覆盖脚本内容，不重复加 cron 行。
+ensure_gateway_watchdog() {
+    local wd="${TRIM_PKGVAR}/gateway-watchdog.sh"
+    mkdir -p "${TRIM_PKGVAR}" 2>/dev/null
+
+    cat > "${wd}" <<WD_EOF
+#!/bin/bash
+# Hermes Studio gateway 兜底守护（由 cmd/main 自动生成，升级后自动重建）
+# 作用：gateway 不在运行就拉起。gateway 是 hermes cron 调度器与消息通道的宿主，
+#       它一停，所有定时任务与消息推送全静默失效（实测停摆 21 小时无人察觉）。
+# 为什么必须用系统 cron：hermes cron 自己就住在 gateway 进程里，gateway 挂了
+#       它一起哑，无法守护自己。
+# 判存活用 \`hermes gateway status\` 而非 gateway_state.json —— 后者是「上次写入时」
+#       的状态，进程死了仍可能留 gateway_state=running + 已死的 pid（实测残留 21h）。
+set +e
+HERMES_HOME_DIR="${HERMES_HOME}"
+HERMES_BIN="${HERMES_AGENT_ROOT}/venv/bin/hermes"
+LOG="${TRIM_PKGVAR}/gateway-watchdog.log"
+LOCK="${TRIM_PKGVAR}/.gateway-watchdog.lock"
+
+mkdir -p "\$(dirname "\$LOG")" 2>/dev/null
+log() { echo "\$(date '+%Y-%m-%d %H:%M:%S') \$*" >> "\$LOG"; }
+
+# 日志滚动：只留最近 2000 行
+if [ -f "\$LOG" ] && [ "\$(wc -l < "\$LOG" 2>/dev/null || echo 0)" -gt 2000 ]; then
+    tail -1000 "\$LOG" > "\$LOG.tmp" 2>/dev/null && mv -f "\$LOG.tmp" "\$LOG"
+fi
+
+# 互斥：上一轮没跑完就不叠加
+if ! mkdir "\$LOCK" 2>/dev/null; then exit 0; fi
+trap 'rmdir "\$LOCK" 2>/dev/null' EXIT
+
+export HERMES_HOME="\$HERMES_HOME_DIR"
+export PATH="\$(dirname "\$HERMES_BIN"):/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin"
+
+[ -x "\$HERMES_BIN" ] || { log "HERMES_BIN 不存在，跳过（等待安装完成）"; exit 0; }
+
+STATUS_OUT="\$("\$HERMES_BIN" gateway status 2>&1)"
+if printf '%s' "\$STATUS_OUT" | grep -qE 'Gateway is running'; then
+    exit 0
+fi
+
+log "gateway 不在运行，尝试拉起。status 尾部：\$(printf '%s' "\$STATUS_OUT" | grep -vE '^\$' | tail -3 | tr '\n' ' ')"
+nohup "\$HERMES_BIN" gateway run --replace >> "${TRIM_PKGVAR}/gateway-boot.out" 2>&1 &
+log "已发起启动 pid=\$!"
+
+for i in \$(seq 1 30); do
+    sleep 2
+    if "\$HERMES_BIN" gateway status 2>&1 | grep -qE 'Gateway is running'; then
+        log "✅ gateway 已恢复运行（等待 \$((i*2))s）"
+        exit 0
+    fi
+done
+log "❌ gateway 启动后 60s 仍未就绪，需人工介入（见 ${TRIM_PKGVAR}/gateway-boot.out）"
+exit 0
+WD_EOF
+    chmod +x "${wd}" 2>/dev/null || true
+
+    # 安装 cron 条目（幂等，用标记行识别自己）
+    local marker="# hermes-studio-gateway-watchdog"
+    local cron_line="* * * * * /bin/bash ${wd} >/dev/null 2>&1"
+    install_watchdog_cron "${marker}" "${cron_line}" "/etc/cron.d/hermes-studio-gateway"
+}
+
+# 把一条 cron 条目装进系统 cron（幂等：同标记的旧条目先删再加）。
+# root → /etc/cron.d（无用户 crontab 限制）；非 root → 自己的 crontab。
+install_watchdog_cron() {
+    local marker="$1" cron_line="$2" file="$3"
+    if [ "$(id -u)" -eq 0 ]; then
+        # root：写 /etc/cron.d。带 SHELL/PATH 头，避免 cron 用 /bin/sh 且 PATH 过窄
+        {
+            echo "SHELL=/bin/bash"
+            echo "PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin"
+            echo "${marker}"
+            echo "${cron_line}"
+        } > "${file}" 2>/dev/null && chmod 644 "${file}" 2>/dev/null && \
+            log_msg "已装 cron: ${file}" || \
+            log_msg "WARNING: 写 ${file} 失败"
+    else
+        # 应用用户：用自己的 crontab（保留用户已有条目，只替换本标记段）
+        local cur new
+        cur="$(crontab -l 2>/dev/null | grep -vF "${marker}" | grep -vF "$(echo "${cron_line}" | awk '{print $NF}')")"
+        new="$(printf '%s\n%s\n%s\n' "${cur}" "${marker}" "${cron_line}" | sed '/^$/d')"
+        if printf '%s\n' "${new}" | crontab - 2>/dev/null; then
+            log_msg "已装 cron 到 $(whoami) 的 crontab: ${marker}"
+        else
+            log_msg "WARNING: 写 crontab 失败（${marker} 未生效）"
+        fi
+    fi
+}
+
+# B2. FPK 更新链路守护：由 NAS 主动触发 CI，绕开 GitHub Actions schedule 被平台
+#     大量丢触发的问题（实测本仓 156h 内只触发 28/78 次，上游 0.7.27 发了一天没跟上）。
+#     脚本每小时比对「上游最新可打包版本」vs「本仓最新 Release」，落后就 dispatch。
+#     GitHub 自己的 schedule 保留为兜底。
+ensure_fpk_ci_watchdog() {
+    local wd="${TRIM_PKGVAR}/fpk-ci-watchdog.sh"
+    local token_file="${DATA_DIR}/.config/github/token"
+    mkdir -p "${TRIM_PKGVAR}" 2>/dev/null
+
+    # 没有 token 就不装（装了也跑不通，只会每小时写一次失败日志）
+    if [ ! -r "${token_file}" ]; then
+        log_msg "fpk-ci watchdog: skip（无 ${token_file}）"
+        return 0
+    fi
+
+    cat > "${wd}" <<WD_EOF
+#!/bin/bash
+# Hermes Studio FPK 更新点火器（由 cmd/main 自动生成，升级后自动重建）
+# 作用：GitHub Actions 的 schedule 是 best-effort，实测本仓 156h 内只触发 28/78 次
+#       （官方文档：high load 下 queued jobs may be dropped）。本脚本每小时主动比对
+#       上游最新「可打包」版本与本仓最新 Release，落后就 dispatch auto-update.yml。
+# 静默：已是最新 / 探测失败 → 无输出退出。有 CI 在跑时不点火，避免并发覆盖 Release。
+set +e
+REPO="mickeyttsc/ekko-studio-fpk"
+UPSTREAM="EKKOLearnAI/ekko-studio"
+WORKFLOW="auto-update.yml"
+LOG="${TRIM_PKGVAR}/fpk-ci-watchdog.log"
+TOKEN_FILE="${token_file}"
+
+log() { echo "\$(date '+%Y-%m-%d %H:%M:%S') \$*" >> "\$LOG"; }
+
+if [ -f "\$LOG" ] && [ "\$(wc -l < "\$LOG" 2>/dev/null || echo 0)" -gt 2000 ]; then
+    tail -1000 "\$LOG" > "\$LOG.tmp" 2>/dev/null && mv -f "\$LOG.tmp" "\$LOG"
+fi
+
+IFS= read -r TOKEN < "\$TOKEN_FILE" 2>/dev/null
+[ -z "\$TOKEN" ] && exit 0
+
+OUT="\$(python3 - "\$TOKEN" "\$REPO" "\$UPSTREAM" "\$WORKFLOW" <<'PYEOF'
+import json, re, sys, urllib.error, urllib.request
+
+TOKEN, REPO, UPSTREAM, WORKFLOW = sys.argv[1:5]
+API = "https://api.github.com"
+H = {"Authorization": "token " + TOKEN,
+     "Accept": "application/vnd.github+json",
+     "User-Agent": "hermes-fpk-ci-watchdog"}
+
+
+def api(path, method="GET", body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(API + path, data=data, headers=H, method=method)
+    if data:
+        req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=30) as r:
+        raw = r.read().decode("utf-8", "replace")
+    return json.loads(raw) if raw.strip() else {}
+
+
+def vkey(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v))
+
+
+def upstream_latest():
+    rels = api("/repos/%s/releases?per_page=100" % UPSTREAM)
+    cands = []
+    for r in rels:
+        if r.get("prerelease") or r.get("draft"):
+            continue
+        tag = r.get("tag_name", "")
+        if not re.match(r"^v\d+\.\d+\.\d+$", tag):
+            continue
+        ver = tag.lstrip("v")
+        names = {a.get("name", "") for a in r.get("assets", [])}
+        if ("hermes-web-ui-%s.tar.gz" % ver) in names and \
+           ("hermes-web-ui-%s.tar.gz.sha256" % ver) in names:
+            cands.append((r.get("published_at") or "", ver))
+    if not cands:
+        return ""
+    cands.sort(reverse=True)
+    return cands[0][1]
+
+
+def our_latest():
+    try:
+        d = api("/repos/%s/releases/latest" % REPO)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return ""
+        raise
+    m = re.match(r"^v?(\d+\.\d+\.\d+)", d.get("tag_name", ""))
+    return m.group(1) if m else ""
+
+
+def ci_busy():
+    d = api("/repos/%s/actions/runs?per_page=30" % REPO)
+    for x in d.get("workflow_runs", []):
+        if x.get("status") in ("queued", "in_progress", "requested", "waiting", "pending"):
+            return True
+    return False
+
+
+try:
+    up = upstream_latest()
+    ours = our_latest()
+except Exception as e:
+    print("probe_failed: %s" % e)
+    sys.exit(0)
+
+if not up:
+    sys.exit(0)
+if ours and vkey(ours) >= vkey(up):
+    sys.exit(0)
+if ci_busy():
+    sys.exit(0)
+
+try:
+    api("/repos/%s/actions/workflows/%s/dispatches" % (REPO, WORKFLOW),
+        method="POST", body={"ref": "main"})
+except urllib.error.HTTPError as e:
+    print("dispatch_failed: HTTP %s %s" % (e.code, e.read().decode()[:200]))
+    sys.exit(0)
+
+print("fired: upstream=%s our_release=%s" % (up, ours or "none"))
+PYEOF
+)"
+
+if [ -n "\$OUT" ]; then
+    log "\$OUT"
+fi
+exit 0
+WD_EOF
+    chmod +x "${wd}" 2>/dev/null || true
+    install_watchdog_cron "# hermes-studio-fpk-ci-watchdog" "17 * * * * /bin/bash ${wd} >/dev/null 2>&1" "/etc/cron.d/hermes-studio-fpk-ci"
+}
+
 # 清理本应用相关子进程（web-ui / gateway / bridge / mcp / watchdog / monitor / dashboard）。
 # 旧版本 install_init/cmd/main 只清理 web-ui 主进程，导致 gateway/bridge 残留，
 # 新实例启动时 agent bridge 因 IPC socket 冲突而退出（code=1）。
@@ -370,14 +650,31 @@ status() {
     local pid
     # 优先：端口监听即认为运行中
     if is_port_listening "$PORT"; then
+        report_gateway_health
         return 0
     fi
     # 其次：PID 文件存在且进程确实是 hermes-web-ui
     pid=$(pid_from_file)
     if [ -n "$pid" ] && verify_pid_process "$pid"; then
+        report_gateway_health
         return 0
     fi
     return 1
+}
+
+# 在 status 时顺带报一句 gateway 健康状况。
+# 为什么放这里：web-ui 正常 ≠ 应用健康。gateway 一停，hermes cron 与消息通道
+# 全静默失效，而界面上完全看不出来（实测停摆 21 小时无人察觉）。把这条信息
+# 打进 status 输出，让「应用中心看到运行中」不再掩盖 gateway 已死。
+# 纯诊断，不改变 status 的退出码语义。
+report_gateway_health() {
+    local hb="${HERMES_AGENT_ROOT}/venv/bin/hermes"
+    [ -x "${hb}" ] || return 0
+    if HERMES_HOME="${HERMES_HOME}" "${hb}" gateway status 2>&1 | grep -qE 'Gateway is running'; then
+        log_msg "health: web-ui listening on ${PORT}, gateway running"
+    else
+        log_msg "WARNING: web-ui listening on ${PORT} but gateway is NOT running —— hermes cron 与消息推送已停摆，守护会在 1 分钟内拉起"
+    fi
 }
 
 # 把 ${HERMES_HOME}/npm-global/bin 与 ${HOME}/.npm-global/bin 里的可执行文件
@@ -475,6 +772,15 @@ start_process() {
     # 把 npm-global 里装好的 CLI 兜底软链进 NODE_PREFIX/bin（原本就在 PATH 里），
     # 让 WebUI 的 findCommandPaths() 能反查到 dsh 等编码 Agent 可执行文件。
     link_npm_global_bins
+
+    # Gateway 存活保障（两道，随包自带）：
+    #   A. 写回 web-ui 的 gatewayAutoStart 开关 → web-ui 启动时自己拉起 gateway
+    #   B. 装系统 cron 兜底守护 → gateway 意外死掉也能在 1 分钟内自愈
+    # 必须在启动 web-ui 之前执行 A，否则本次启动的 autostart 不会生效。
+    # 两个函数都幂等：重复调用只覆盖脚本，不重复加 cron 行。
+    ensure_gateway_autostart_config
+    ensure_gateway_watchdog
+    ensure_fpk_ci_watchdog
 
     log_msg "starting hermes-web-ui on port ${PORT} ..."
     # 官方 CLI 自带 daemon，--no-open 避免 NAS 上尝试打开浏览器。

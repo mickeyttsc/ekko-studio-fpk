@@ -73,7 +73,13 @@ tar xzf "$FPK" -C "$TMP"
 # 命中即 [Socket.IO] rejected upgrade origin → 页面能开但对话不流式。
 # 远程中继端口每次随机，固定清单覆盖不了，故取 *（与上游 enableClientMode() 同款）。
 # 注意：web-ui 不加载 .env（无 dotenv/loadEnvFile），cmd/main 的 export 是唯一注入点。
-if ! grep -vE '^[[:space:]]*#' "$TMP/cmd/main" | grep -q 'CORS_ORIGINS'; then
+# ⛔ 不要写 `grep -vE ... file | grep -q X`：在 set -o pipefail 下，右端 grep -q
+#    命中即早退 → 左端 grep 收 SIGPIPE(141) → 整个管道返回 141 →
+#    `if ! pipeline` 判成「未命中」而**误报失败**（实测 50 次里失败 2 次，flaky）。
+#    反向检查（`if pipeline; then 报错`）更危险：141 让 if 为假 → **坏包静默放行**。
+#    一律先落文件再 grep（本文件开头已写明这条，这里是它的具体落点）。
+grep -vE '^[[:space:]]*#' "$TMP/cmd/main" > "$TMP/main.code" 2>/dev/null || true
+if ! grep -q 'CORS_ORIGINS' "$TMP/main.code"; then
     echo "::error:: cmd/main 未注入 CORS_ORIGINS —— 反代/FN Connect 中继下 Socket.IO 会被拒（页面能开、对话不流式）"
     exit 1
 fi
@@ -190,7 +196,9 @@ if ! grep -q 'hermes-home/.env' "$TMP/cmd/install_callback"; then
     exit 1
 fi
 # 只查【可执行代码行】，跳过注释 —— 否则解释性注释里提到旧路径就会误报
-if grep -vE '^[[:space:]]*#' "$TMP/cmd/install_callback" | grep -q 'DATA_DIR}/\.hermes/\.env'; then
+# （先落文件再 grep，避免管道 + pipefail 的 SIGPIPE 假阴性/假阳性）
+grep -vE '^[[:space:]]*#' "$TMP/cmd/install_callback" > "$TMP/install_cb.code" 2>/dev/null || true
+if grep -q 'DATA_DIR}/\.hermes/\.env' "$TMP/install_cb.code"; then
     echo "::error:: install_callback 仍写着内核读不到的 data/.hermes/.env 路径"
     exit 1
 fi
@@ -242,7 +250,12 @@ if grep -qE 'hermes-agent-node/(home/|.*/\.agent-node-work/)' "$TMP/inner.list";
 fi
 echo "✅ 无构建机绝对路径污染"
 
-if grep -hvE '^[[:space:]]*#' "$TMP"/cmd/* 2>/dev/null | grep -qE 'pkill[^|]*"(bin/|dist/)'; then
+# ⛔ 这里原先是 `grep -hvE ... cmd/* | grep -qE 'pkill...'` 的管道写法。
+#    在 set -o pipefail 下右端 grep -q 命中即早退 → 左端收 SIGPIPE(141) →
+#    管道返回 141 → `if` 为假 → **宽泛 pkill 检查被静默跳过、坏包放行**
+#    （正是本文件开头警告的那类假阴性）。必须先落文件再 grep。
+grep -hvE '^[[:space:]]*#' "$TMP"/cmd/* > "$TMP/cmd.code" 2>/dev/null || true
+if grep -qE 'pkill[^|]*"(bin/|dist/)' "$TMP/cmd.code"; then
     echo "::error:: cmd/* 中存在宽泛 pkill 模式（bin/ / dist/ 关键词），会误杀 Docker 容器，构建中止"
     exit 1
 fi
@@ -255,6 +268,37 @@ for cb in install_callback upgrade_callback main; do
     fi
 done
 echo "✅ DSH 凭据保护在 install/upgrade/main 三处入口均存在"
+
+# ── Gateway 存活保障必须在 cmd/main 里（2026-10-02 加）────────────────────────
+# 真实故障：fnOS 应用升级杀掉 gateway 却不重启它（cmd/upgrade_init 的
+# clean_app_processes 明确 pkill 本应用 agent 树），而 web-ui 的
+# gateway-autostart 唯一补偿路径依赖 data/config.json 的 gatewayAutoStart.enabled，
+# 该键从未被写入过 → 升级后 gateway 永久不再起来，hermes cron 与消息通道全停
+# （实测停摆 21 小时无人察觉）。因此 start_process 必须自带两道保障。
+# 缺任一条，升级一次就会静默复发。
+for fn in ensure_gateway_autostart_config ensure_gateway_watchdog ensure_fpk_ci_watchdog; do
+    if ! grep -q "^${fn}()" "$TMP/cmd/main"; then
+        echo "::error:: cmd/main 缺少 ${fn}() —— gateway 自愈/CI 点火能力缺失，升级后 cron 会静默停摆"
+        exit 1
+    fi
+done
+# 三个都必须真的被 start_process 调用（定义了不调用等于没有）
+for fn in ensure_gateway_autostart_config ensure_gateway_watchdog ensure_fpk_ci_watchdog; do
+    n="$(grep -c "^\s*${fn}$" "$TMP/cmd/main" || true)"
+    if [ "${n:-0}" -lt 1 ]; then
+        echo "::error:: cmd/main 定义了 ${fn}() 但未在 start_process 中调用"
+        exit 1
+    fi
+done
+echo "✅ gateway 自愈 + CI 点火已在 cmd/main 定义并被调用"
+
+# 守护必须走【系统 cron】而非 hermes cron —— hermes cron 住在 gateway 进程里，
+# gateway 挂了它一起哑，无法守护自己。回归门禁：必须出现 crontab / cron.d 写入。
+if ! grep -qE 'crontab -|/etc/cron\.d/' "$TMP/cmd/main"; then
+    echo "::error:: cmd/main 未把守护装进系统 cron（crontab 或 /etc/cron.d）—— 用 hermes cron 守护自己无效"
+    exit 1
+fi
+echo "✅ gateway 守护装在系统 cron（不依赖 gateway 自身存活）"
 
 # 上游改名（hermes-studio -> ekko-studio）后新增了 ekko-studio-mcp / ekko-studio-web
 # 两个 bin 入口。若 fix_bundled_bin_links 又退回写死清单，走 bundled 离线复制路径时
