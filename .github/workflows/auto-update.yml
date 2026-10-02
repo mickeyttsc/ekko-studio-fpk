@@ -151,6 +151,11 @@ jobs:
           fi
 
           # 版本号规则：web-ui 主版本变化则重置 build 为 1，否则 build+1
+          # ⚠️ 只有「上游变了」才会走到这里。本仓自己的修复（cmd/main、打包逻辑等）
+          #    不会让 CHANGED=1，因此**必须手动 bump build 号**，否则 fnOS 认为版本
+          #    没变、不会提示升级 —— 修复永远到不了已装实例（实测踩过：加了 gateway
+          #    自愈的包与旧包同为 0.7.27-1，应用中心无更新提示）。
+          #    手动 bump 的做法：改 manifest 的 version（如 0.7.27-1 → 0.7.27-2）。
           if [ "${WEBUI_LATEST}" != "${CUR_BASE}" ]; then
             NEW_BASE="${WEBUI_LATEST}"
             NEW_BUILD=1
