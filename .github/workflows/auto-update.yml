@@ -35,8 +35,24 @@ name: Auto-update upstream versions
 
 on:
   schedule:
-    # 每 2 小时检查一次上游（避开整点，降低 GitHub 限流概率）
-    - cron: '23 */2 * * *'
+    # 多个槽位并存，专门对抗 GitHub schedule 的「丢触发」。
+    #
+    # 实测（2026-10-02）：单个槽位 '23 */2 * * *' 在 156 小时内只触发 28/78 次
+    # （平均间隔 5.78h、最长 8.61h），同账号另一个公共仓同样烂（5.86h/8.70h）
+    # —— 这是 GitHub 对公共仓共享调度器的降权，官方文档：
+    #   "Scheduled events can be delayed during periods of high loads...
+    #    If the load is sufficiently high enough, some queued jobs may be dropped."
+    #
+    # 为什么加槽位有效：丢的是「某一次触发」，不是「整个 cron」。多设几个不同分钟
+    # 的槽位，同一时段被丢一个还有别的兜住，等效把守约率从 ~1/3 抬到接近 1。
+    # 冗余本身无害：auto-update 会先比对版本，无变化则空跑退出（幂等），
+    # 且 build.yml 的 gate 用「本仓是否已有该版本 Release」当幂等键，不会重复构建。
+    #
+    # 分钟数刻意打散（07/22/37/52）避开整点高负载，也不等距（避免同一分片）。
+    - cron: '07 */2 * * *'
+    - cron: '22 */2 * * *'
+    - cron: '37 */2 * * *'
+    - cron: '52 */2 * * *'
   workflow_dispatch:
 
 permissions:
