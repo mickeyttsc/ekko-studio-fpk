@@ -156,6 +156,15 @@ export PATH="\$(dirname "\$HERMES_BIN"):/usr/local/sbin:/usr/local/bin:/sbin:/bi
 
 [ -x "\$HERMES_BIN" ] || { log "HERMES_BIN 不存在，跳过（等待安装完成）"; exit 0; }
 
+# ⚠️ 只在【本应用正在运行】时才拉起 gateway。
+#    否则用户在应用中心「停止」本应用后，守护会立刻把 gateway 拉回来，
+#    出现「应用显示已停止、但 Telegram/微信仍在收发、cron 仍在跑」的怪状态。
+#    判据用 web-ui 端口：应用被停时 web-ui 也一起停，端口不监听 → 不干预。
+APP_PORT="${PORT}"
+if ! ss -tln 2>/dev/null | awk -v p=":\${APP_PORT}" '\$0 ~ p && \$0 ~ /LISTEN/ {found=1} END {exit !found}'; then
+    exit 0
+fi
+
 STATUS_OUT="\$("\$HERMES_BIN" gateway status 2>&1)"
 if printf '%s' "\$STATUS_OUT" | grep -qE 'Gateway is running'; then
     exit 0
@@ -180,13 +189,17 @@ WD_EOF
     # 安装 cron 条目（幂等，用标记行识别自己）
     local marker="# hermes-studio-gateway-watchdog"
     local cron_line="* * * * * /bin/bash ${wd} >/dev/null 2>&1"
-    install_watchdog_cron "${marker}" "${cron_line}" "/etc/cron.d/hermes-studio-gateway"
+    install_watchdog_cron "${marker}" "${cron_line}" "/etc/cron.d/hermes-studio-gateway" "${wd}"
 }
 
 # 把一条 cron 条目装进系统 cron（幂等：同标记的旧条目先删再加）。
 # root → /etc/cron.d（无用户 crontab 限制）；非 root → 自己的 crontab。
+# ⛔ 清理旧条目必须按「标记行 + 脚本路径」双条件过滤，不能取 cron_line 的最后一个
+#    字段 —— 命令尾部的 `>/dev/null 2>&1` 让 $NF 变成 `2>&1`，于是**永远匹配不到
+#    自己写的旧行**，结果旧行残留、新行叠加（实测：装两次后 crontab 里剩两行标记 +
+#    一行真条目）。脚本路径要单独传进来。
 install_watchdog_cron() {
-    local marker="$1" cron_line="$2" file="$3"
+    local marker="$1" cron_line="$2" file="$3" script_path="$4"
     if [ "$(id -u)" -eq 0 ]; then
         # root：写 /etc/cron.d。带 SHELL/PATH 头，避免 cron 用 /bin/sh 且 PATH 过窄
         {
@@ -200,7 +213,7 @@ install_watchdog_cron() {
     else
         # 应用用户：用自己的 crontab（保留用户已有条目，只替换本标记段）
         local cur new
-        cur="$(crontab -l 2>/dev/null | grep -vF "${marker}" | grep -vF "$(echo "${cron_line}" | awk '{print $NF}')")"
+        cur="$(crontab -l 2>/dev/null | grep -vF "${marker}" | grep -vF "${script_path}")"
         new="$(printf '%s\n%s\n%s\n' "${cur}" "${marker}" "${cron_line}" | sed '/^$/d')"
         if printf '%s\n' "${new}" | crontab - 2>/dev/null; then
             log_msg "已装 cron 到 $(whoami) 的 crontab: ${marker}"
@@ -342,7 +355,7 @@ fi
 exit 0
 WD_EOF
     chmod +x "${wd}" 2>/dev/null || true
-    install_watchdog_cron "# hermes-studio-fpk-ci-watchdog" "17 * * * * /bin/bash ${wd} >/dev/null 2>&1" "/etc/cron.d/hermes-studio-fpk-ci"
+    install_watchdog_cron "# hermes-studio-fpk-ci-watchdog" "17 * * * * /bin/bash ${wd} >/dev/null 2>&1" "/etc/cron.d/hermes-studio-fpk-ci" "${wd}"
 }
 
 # 清理本应用相关子进程（web-ui / gateway / bridge / mcp / watchdog / monitor / dashboard）。
