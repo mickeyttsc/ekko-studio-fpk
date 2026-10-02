@@ -50,6 +50,15 @@ on:
     # 只负责「点火」。真正的检查由长驻 job 内部循环完成，故无需高频 cron。
     - cron: '*/5 * * * *'
   workflow_dispatch:
+    inputs:
+      single_tick:
+        description: '只跑一次巡检就退出（用于快速验证链路，不进入长驻轮询）'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
 permissions:
   contents: write
@@ -76,9 +85,17 @@ jobs:
       - name: Poll upstream continuously
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SINGLE_TICK: ${{ inputs.single_tick }}
         run: |
           set -uo pipefail
           chmod +x scripts/auto-update-tick.sh
+
+          # 快速验证模式：只跑一次就退出，便于确认 CI 环境下 tick 真的能执行
+          if [ "${SINGLE_TICK}" = "true" ]; then
+            echo "single_tick=true → 只跑一次巡检"
+            bash scripts/auto-update-tick.sh
+            exit 0
+          fi
 
           TICK_INTERVAL=300          # 每 5 分钟巡检一次
           JOB_SECONDS=20400          # 5h40m（留足余量给 6h 上限）
