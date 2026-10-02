@@ -35,24 +35,23 @@ name: Auto-update upstream versions
 
 on:
   schedule:
-    # 多个槽位并存，专门对抗 GitHub schedule 的「丢触发」。
+    # GitHub 允许的最快 schedule 间隔 = 5 分钟（官方文档：shortest interval is
+    # once every 5 minutes），即 288 次/天。这是「GitHub 侧最快跟进上游」的上限。
     #
-    # 实测（2026-10-02）：单个槽位 '23 */2 * * *' 在 156 小时内只触发 28/78 次
-    # （平均间隔 5.78h、最长 8.61h），同账号另一个公共仓同样烂（5.86h/8.70h）
-    # —— 这是 GitHub 对公共仓共享调度器的降权，官方文档：
-    #   "Scheduled events can be delayed during periods of high loads...
-    #    If the load is sufficiently high enough, some queued jobs may be dropped."
+    # 为什么加密有效（2026-10-02 实测建模，非推测）：
+    #   单槽位时代 '23 */2 * * *'（12 次/天）实测 162h 内触发 29/81 次 = 36%，
+    #   间隔均值 5.78h、标准差 1.42h（最小 3.0h / 最大 8.6h）。
+    #   按几何分布检验：理论均值 2h/0.36 = 5.59h，实测 5.78h → 吻合。
+    #   结论：丢的是「每次尝试独立随机丢失」，不是「按仓封顶」。
+    #   （曾误判为按仓封顶并据此否定加槽位，证据不足，已撤销。）
+    #   既然每次尝试独立，那么把尝试次数从 12/天 提到 288/天，
+    #   期望触发就从 4.3/天 提到 ~104/天，平均跟进延迟 ~14 分钟。
     #
-    # 为什么加槽位有效：丢的是「某一次触发」，不是「整个 cron」。多设几个不同分钟
-    # 的槽位，同一时段被丢一个还有别的兜住，等效把守约率从 ~1/3 抬到接近 1。
-    # 冗余本身无害：auto-update 会先比对版本，无变化则空跑退出（幂等），
-    # 且 build.yml 的 gate 用「本仓是否已有该版本 Release」当幂等键，不会重复构建。
-    #
-    # 分钟数刻意打散（07/22/37/52）避开整点高负载，也不等距（避免同一分片）。
-    - cron: '07 */2 * * *'
-    - cron: '22 */2 * * *'
-    - cron: '37 */2 * * *'
-    - cron: '52 */2 * * *'
+    # 冗余无害（重要）：
+    #   auto-update 先比对版本，无变化则空跑退出（幂等）；build.yml 的 gate 以
+    #   「本仓是否已有该版本 Release」为幂等键，不会重复构建、不会重复发 Release。
+    #   公共仓 Actions 分钟数免费且不限量。
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 permissions:
