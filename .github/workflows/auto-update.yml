@@ -58,6 +58,14 @@ on:
 permissions:
   contents: write
 
+# 4 个 cron 槽位意味着可能有两个 run 同时醒来（或一个在 push 时另一个刚好启动）。
+# 它们都要 git commit + push 到 main，并发会有一个被拒（non-fast-forward）而变红。
+# 用 concurrency 串行化：同组只跑一个，其余排队等待而不是取消 ——
+# 排队而非取消很关键：被取消的那个可能是唯一能发现新版本的那次。
+concurrency:
+  group: auto-update-upstream
+  cancel-in-progress: false
+
 jobs:
   check-upstream:
     runs-on: ubuntu-latest
