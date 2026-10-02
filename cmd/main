@@ -251,6 +251,7 @@ UPSTREAM="EKKOLearnAI/ekko-studio"
 WORKFLOW="auto-update.yml"
 LOG="${TRIM_PKGVAR}/fpk-ci-watchdog.log"
 TOKEN_FILE="${token_file}"
+export FPK_CI_STATE="${TRIM_PKGVAR}/fpk-ci-state.json"
 
 log() { echo "\$(date '+%Y-%m-%d %H:%M:%S') \$*" >> "\$LOG"; }
 
@@ -262,13 +263,25 @@ IFS= read -r TOKEN < "\$TOKEN_FILE" 2>/dev/null
 [ -z "\$TOKEN" ] && exit 0
 
 OUT="\$(python3 - "\$TOKEN" "\$REPO" "\$UPSTREAM" "\$WORKFLOW" <<'PYEOF'
-import json, re, sys, urllib.error, urllib.request
+import json, re, sys, urllib.error, urllib.request, time, os
 
 TOKEN, REPO, UPSTREAM, WORKFLOW = sys.argv[1:5]
 API = "https://api.github.com"
+STATE = os.environ.get("FPK_CI_STATE", "/tmp/fpk-ci-state.json")
 H = {"Authorization": "token " + TOKEN,
      "Accept": "application/vnd.github+json",
      "User-Agent": "hermes-fpk-ci-watchdog"}
+
+
+def write_state(ok, detail):
+    """记录本轮探测结果。fpk_check.sh 会读它来判断点火器是否已「静默腐烂」：
+    上游改资产命名 / token 失效 / API 变更都会让本脚本静默 exit 0，
+    若不落状态，这种失效永远没人发现（实测顾虑点）。"""
+    try:
+        with open(STATE, "w") as f:
+            json.dump({"ts": int(time.time()), "ok": ok, "detail": detail}, f)
+    except Exception:
+        pass
 
 
 def api(path, method="GET", body=None):
@@ -328,11 +341,16 @@ try:
     up = upstream_latest()
     ours = our_latest()
 except Exception as e:
+    write_state(False, "probe_failed: %s" % e)
     print("probe_failed: %s" % e)
     sys.exit(0)
 
 if not up:
+    write_state(False, "no_packagable_upstream_release（上游可能改了资产命名）")
     sys.exit(0)
+
+write_state(True, "upstream=%s our=%s" % (up, ours or "none"))
+
 if ours and vkey(ours) >= vkey(up):
     sys.exit(0)
 if ci_busy():
