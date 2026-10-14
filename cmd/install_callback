@@ -567,6 +567,15 @@ rm -f "\${MARKER}"
         fail "hermes command not found after install"
     fi
 
+    # 4b) FPK 内核完整性硬校验 + install-stamp 补写（2026-10-14 根因固化）。
+    #     venv Python <3.14 或 marker 依赖（openai/httpx/requests/pydantic…）
+    #     缺失时必须判失败 —— 残缺内核静默出厂，很久以后才以运行错误暴露，
+    #     无法归因。stamp 缺失只降级版本显示（脚本内部容错），不阻断安装。
+    echo ">>> Verifying kernel integrity (python>=3.14 / core deps / install-stamp) ..."
+    if ! bash "\${APP_DIR}/config/bootstrap/hermes-agent-postinstall.sh" "\${AGENT_ROOT}" "\${APP_DIR}"; then
+        fail "post-install kernel verification failed (see log above)"
+    fi
+
     # 5) 确保应用用户能读写 Agent 与 HOME 目录（后台脚本可能以 root 运行）
     echo ">>> Fixing permissions ..."
     chown -R "\${APP_USER}:\${APP_USER}" "\${AGENT_ROOT}" "\${HERMES_HOME}" 2>/dev/null || \

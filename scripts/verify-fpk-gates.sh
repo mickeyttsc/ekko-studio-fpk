@@ -338,6 +338,66 @@ if ! grep -q 'package.json' "$TMP/cmd/install_callback" 2>/dev/null; then
 fi
 echo "✅ bin 入口按 package.json 动态重建（上游改名/新增入口不会漏）"
 
+# ── 内核完整性三防（2026-10-14 技术简报根因固化，防复发门禁）──
+# 事故模型：上游 pyproject 把全部核心依赖 gate 在 python_version >= '3.14'
+# marker 上；历史 vendored install.sh 用 PYTHON_VERSION=3.11 建 venv →
+# 依赖被静默跳过 → 残缺内核正常出厂。锚点若混入 +canary/日期式 tag，
+# 包内代码与 hermes_cli 版本显示同样失真。
+
+# 1) 锚点格式：只许 vX.Y.Z（拒绝 +canary 预发布与日期式 v2026.x.y 回潮）
+if [ -f "$TMP/config/bootstrap/hermes-agent-version.env" ]; then
+    ANCHOR="$(grep '^HERMES_AGENT_VERSION=' "$TMP/config/bootstrap/hermes-agent-version.env" | cut -d= -f2 | tr -d '[:space:]' || true)"
+    if printf '%s' "$ANCHOR" | grep -q 'canary'; then
+        echo "::error:: HERMES_AGENT_VERSION 锚点含 +canary 预发布标签: '$ANCHOR' —— 打包只跟正式 release，构建中止"
+        exit 1
+    fi
+    if ! printf '%s' "$ANCHOR" | grep -qE '^(v[0-9]+\.[0-9]+\.[0-9]+|main)$'; then
+        echo "::error:: HERMES_AGENT_VERSION 锚点格式非法: '$ANCHOR'（要求 vX.Y.Z 正式语义化标签或 main；日期式 v2026.x.y 已停止跟随）"
+        exit 1
+    fi
+    echo "✅ Agent 版本锚点合规 ($ANCHOR)"
+else
+    echo "::error:: 外层缺 config/bootstrap/hermes-agent-version.env（内核锚点丢失，auto-update 链路断裂）"
+    exit 1
+fi
+
+# 2) vendored install.sh 的 Python 地板必须 >= 3.14。
+#    重新 vendor 上游脚本时极易把上游的 3.11 默认值带回来 → marker 静默跳依赖。
+tar xzf "$TMP/app.tgz" -C "$TMP" config/bootstrap/hermes-agent-install.sh 2>/dev/null || true
+if [ -f "$TMP/config/bootstrap/hermes-agent-install.sh" ]; then
+    # 先落文件再 grep（勿用管道，SIGPIPE 假阴性，见本文件开头纪律）
+    grep -E '^PYTHON_VERSION=' "$TMP/config/bootstrap/hermes-agent-install.sh" > "$TMP/pyver.line" 2>/dev/null || true
+    PYV="$(sed -n '1p' "$TMP/pyver.line" | tr -d '"' | cut -d= -f2)"
+    case "$PYV" in
+        3.14|3.15|3.1[6-9]|3.[2-9][0-9]) : ;;
+        *) echo "::error:: vendored install.sh PYTHON_VERSION='$PYV'（要求 >= 3.14）—— 低版本 venv 会让 marker 依赖静默跳过，装机必残，构建中止"; exit 1 ;;
+    esac
+    if [ "$(grep -cE '^PYTHON_VERSION=' "$TMP/config/bootstrap/hermes-agent-install.sh")" != "1" ]; then
+        echo "::error:: install.sh 出现多行 PYTHON_VERSION 赋值（后写覆盖先写，FPK-PATCH 可能被重新 vendor 抹掉），构建中止"
+        exit 1
+    fi
+    echo "✅ vendored install.sh Python 地板 = $PYV (>= 3.14)"
+else
+    echo "::error:: 内层缺 config/bootstrap/hermes-agent-install.sh（bundled 安装器丢失）"
+    exit 1
+fi
+
+# 3) 装后校验脚本必须【同时】存在于内层并被 install_callback 硬调用（fail 级）。
+#    只有脚本没有调用 = 残缺内核照样静默出厂。
+if ! grep -qE '^config/bootstrap/hermes-agent-postinstall\.sh$' "$TMP/inner.list"; then
+    echo "::error:: 内层缺 config/bootstrap/hermes-agent-postinstall.sh（装后内核完整性校验脚本丢失）"
+    exit 1
+fi
+if ! grep -q 'hermes-agent-postinstall.sh' "$TMP/cmd/install_callback"; then
+    echo "::error:: cmd/install_callback 未调用 hermes-agent-postinstall.sh —— Python 地板/依赖完整性/stamp 无人校验，构建中止"
+    exit 1
+fi
+if ! grep -qE 'fail "post-install kernel verification failed' "$TMP/cmd/install_callback"; then
+    echo "::error:: install_callback 对 postinstall 校验失败只是警告未 fail —— 校验形同虚设，构建中止"
+    exit 1
+fi
+echo "✅ 装后内核完整性校验已内嵌且失败即判安装失败"
+
 # ── 反自检：确保上面的门禁真的会拦 ──
 # 所有检查都依赖 grep 的返回值。若有人改回 `echo "$BIG" | grep -q ...`，
 # SIGPIPE 会让检查静默失效（命中也会被判成未命中）。这里断言「已知存在的

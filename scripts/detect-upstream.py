@@ -65,9 +65,31 @@ def latest_webui_version():
     return cands[0][1]
 
 
+AGENT_SEMVER_RE = re.compile(r"^v\d+\.\d+\.\d+$")
+
+
 def latest_agent_tag():
-    d = json.loads(_get("%s/repos/%s/releases/latest" % (API, AGENT_REPO)))
-    return d.get("tag_name", "")
+    """返回最新【正式】release 标签。
+
+    不能用 releases/latest：
+      1. 上游同一仓库既发语义化（v0.22.0）也发历史日期式（v2026.9.24）tag，
+         latest 指针可能落在任一类型上；我们只跟语义化（与 fpk 锚点注释一致）。
+      2. 上游还会发 `vX.Y.Z+canary.<ts>` 预发布，不能入选。
+    故拉 releases 列表，过滤 prerelease/draft + ^v\\d+\\.\\d+\\.\\d+$，按 published_at 取最新。
+    """
+    data = json.loads(_get("%s/repos/%s/releases?per_page=100" % (API, AGENT_REPO)))
+    cands = []
+    for r in data:
+        if r.get("prerelease") or r.get("draft"):
+            continue
+        tag = r.get("tag_name", "")
+        if not AGENT_SEMVER_RE.match(tag):
+            continue
+        cands.append((r.get("published_at") or "", tag))
+    if not cands:
+        return ""
+    cands.sort(reverse=True)
+    return cands[0][1]
 
 
 def asset_sha256(version):

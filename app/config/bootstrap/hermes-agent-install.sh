@@ -56,7 +56,15 @@ else
     INSTALL_DIR=""
     INSTALL_DIR_EXPLICIT=false
 fi
-PYTHON_VERSION="3.11"
+# FPK-PATCH(2026-10-14, fnos): 上游此值曾为 "3.11"，但 hermes-agent v0.21.7 起
+# pyproject.toml 里【全部核心依赖】(openai/httpx/requests/pydantic/rich…) 都带
+# `python_version >= '3.14'` marker；requires-python 的 ">=3.11" 只是给存量旧
+# 安装跑 update 用的兼容通道。用 <3.14 建 venv 时这些依赖会被 marker【静默跳过】
+# ——装出一个 import openai 就炸的残缺内核，且安装全程不报错。
+# 上游 pyproject 原文：“we *only* support 3.14”。fnOS 全新装机必须直接建 3.14。
+# ⛔ 回归门禁：scripts/verify-fpk-gates.sh 断言本行 minor >= 14，重新 vendor
+#    上游旧文案时构建会红，不会静默放行残缺包。
+PYTHON_VERSION="3.14"
 NODE_VERSION="22"
 
 # FHS-style root install layout (set by resolve_install_layout when applicable):
@@ -1359,13 +1367,15 @@ setup_venv() {
     # uv creates the venv and pins the Python version in one step
     $UV_CMD venv venv --python "$PYTHON_VERSION"
 
-    # Neutralize any inherited UV_PYTHON (e.g. UV_PYTHON=3.14 left in the
+    # Neutralize any inherited UV_PYTHON (a different minor left in the
     # user's shell env). uv honours UV_PYTHON over an existing venv for the
     # later `uv sync` / `uv pip install` tiers, so without this it would
-    # silently delete this 3.11 venv and recreate it at the inherited
+    # silently delete this venv and recreate it at the inherited
     # version — building Rust transitives that have no wheel for that
     # version from source via maturin, which fails. Pinning UV_PYTHON to the
     # interpreter we just created forces every subsequent uv command onto it.
+    # (FPK-PATCH: the old wording hard-coded "3.11/3.14" examples; both
+    # directions are equally poisonous now that the floor is 3.14.)
     if [ -x "$INSTALL_DIR/venv/bin/python" ]; then
         export UV_PYTHON="$INSTALL_DIR/venv/bin/python"
     fi
@@ -1379,9 +1389,12 @@ install_deps() {
     # Re-pin UV_PYTHON to the venv interpreter. setup_venv already does this,
     # but the bootstrap runs install stages (`venv`, `python-deps`) as separate
     # processes, so an export from setup_venv does NOT survive into a separate
-    # python-deps invocation. Re-deriving it here covers that path. Without it,
-    # an inherited UV_PYTHON=3.14 makes the uv sync/pip tiers below recreate the
-    # venv at 3.14 and fail the maturin source build (no cp314 wheels yet).
+    # python-deps invocation. Re-deriving it here covers that path: any
+    # inherited UV_PYTHON pointing at a DIFFERENT minor would make the uv
+    # sync/pip tiers below recreate the venv on that interpreter and resolve
+    # the dependency graph against the wrong marker set.
+    # (FPK-PATCH: wording updated — 3.14 is the SUPPORTED floor now, not a
+    # "no wheels yet" hazard as the old comment claimed.)
     if [ "$DISTRO" != "termux" ] && [ -x "$INSTALL_DIR/venv/bin/python" ]; then
         export UV_PYTHON="$INSTALL_DIR/venv/bin/python"
     fi

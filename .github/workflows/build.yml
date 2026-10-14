@@ -245,6 +245,11 @@ jobs:
           set -euo pipefail
           DESIRED_REF="$(grep '^HERMES_AGENT_VERSION=' config/bootstrap/hermes-agent-version.env | cut -d= -f2)"
           [ -z "$DESIRED_REF" ] && DESIRED_REF="main"
+          # 锚点格式硬校验：vX.Y.Z 或 main，别的（+canary/日期式/空垃圾）一律红
+          if ! printf '%s' "$DESIRED_REF" | grep -qE '^(v[0-9]+\.[0-9]+\.[0-9]+|main)$'; then
+            echo "::error:: HERMES_AGENT_VERSION 锚点非法: '$DESIRED_REF'（允许 vX.Y.Z 或 main；拒绝 +canary 预发布与日期式 tag）"
+            exit 1
+          fi
           REF_MARKER="app/hermes-agent-src/.bundled-agent-ref"
           if [ -f "$REF_MARKER" ] && [ "$(cat "$REF_MARKER")" = "$DESIRED_REF" ] && [ -f "app/hermes-agent-src/pyproject.toml" ]; then
             echo "Hermes Agent 离线源码包已存在且 ref 匹配 ($DESIRED_REF)，跳过下载"
@@ -264,18 +269,15 @@ jobs:
             echo "  下载失败，重试..."
             sleep 5
           done
-          # 标签下载失败回退 main（保证离线包仍能生成，仅失去该次可复现性）
-          if [ ! -s /tmp/ha.tar.gz ] && [ "$DESIRED_REF" != "main" ]; then
-            echo "WARNING: 按 $DESIRED_REF 下载失败，回退 main"
-            for i in 1 2 3; do
-              curl -fsSL --max-time 600 "${AUTH[@]}" \
-                "https://api.github.com/repos/NousResearch/hermes-agent/tarball/main" \
-                -o /tmp/ha.tar.gz && break
-              sleep 5
-            done
-            DESIRED_REF="main"
+          # 标签下载失败 => 中止构建。⛔ 不要再回退 main：静默回退会装出
+          # 「锚点写 vA.B.C、内核实为 main 前沿」的不可复现包，版本显示与
+          # hermes update 的通道判定全部失真（2026-10-14 简报根因之一）。
+          # main 只允许作为【显式锚点值】（auto-update 检测不到任何 tag 时的
+          # 兜底），那时下载目标本来就是 main。
+          if [ ! -s /tmp/ha.tar.gz ]; then
+            echo "::error:: Hermes Agent 源码包按 ref=${DESIRED_REF} 下载失败（网络问题或 tag 不存在），中止构建（拒绝静默回退 main 造成锚点/内核错位）"
+            exit 1
           fi
-          [ -s /tmp/ha.tar.gz ] || { echo "::error:: Hermes Agent 源码包下载失败（GitHub 网络问题），中止构建"; exit 1; }
           mkdir -p app/hermes-agent-src
           tar -xzf /tmp/ha.tar.gz -C /tmp/ha-extract --strip-components=1
           # 含隐藏文件迁移（.gitignore 必须带上，否则满树 untracked 假脏）
