@@ -274,15 +274,24 @@ def selftest():
         "scripts/verify-fpk-gates.sh",
         "scripts/build-fpk.sh",
         "scripts/auto-update-tick.sh",
+        "cmd/main",                                    # 装机运行时（无扩展名，曾漏在扫描外）
+        "app/config/bootstrap/hermes-agent-postinstall.sh",
     ]
+    # 行级禁令：任何消费方**逐行**都不许自带版本正则（宽松或严格都不行）。
+    # 早前是文件级豁免 —— 文件里出现过 anchor-ok 就整份放行，于是「再手抄一份
+    # 严格口径」这种漂移抓不到（本仓正是因为手抄才漏改第三处门禁的）。
+    hardcoded = re.compile(r"grep\s+-[A-Za-z]*E\s+.*v(\[0-9\]|\\d)")
     for rel in consumers:
         fp = os.path.join(root, rel)
         if not os.path.exists(fp):
             continue
         text = open(fp, encoding="utf-8", errors="replace").read()
-        has_anchor_check = re.search(r"grep\s+-qE\s+'?\^?\(?v\[0-9\]", text)
-        if has_anchor_check and "gate-regex" not in text and "anchor-ok" not in text:
-            fails.append("%s 自带硬编码的 agent 锚点正则，必须改用 gate-regex/anchor-ok 取口径" % rel)
+        for i, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            if hardcoded.search(line):
+                fails.append("%s:%d 自带版本正则（应改用 detect-upstream.py 的 anchor-ok/gate-regex）: %s"
+                             % (rel, i, line.strip()[:100]))
 
     # 宽松口径的「字面量指纹」：直接子串匹配源码，避免用正则去匹配正则。
     # 收紧后的写法（v\d{1,3}\. / v[0-9]{1,3}\.）不含这两个指纹，故不会误报。
@@ -291,7 +300,8 @@ def selftest():
         dirnames[:] = [d for d in dirnames
                        if d not in (".git", "node_modules", "hermes-agent-src", "dist")]
         for fn in filenames:
-            if not fn.endswith((".py", ".sh", ".yml")):
+            # 额外纳入无扩展名的运行时脚本（cmd/main 曾被 .py/.sh/.yml 过滤器漏掉）
+            if not (fn.endswith((".py", ".sh", ".yml")) or fn == "main"):
                 continue
             fp = os.path.join(dirpath, fn)
             try:

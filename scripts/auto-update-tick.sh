@@ -103,9 +103,17 @@ a, b = key(sys.argv[1]), key(sys.argv[2])
 print("yes" if (a is not None and b is not None and b < a) else "no")
 PY
 )"
-    if [ "${DOWNGRADE}" = "yes" ]; then
-        log "候选 agent ${AGENT_LATEST} 低于当前锚点 ${CUR_AGENT}（上游可能重发旧 tag）—— 拒绝倒退，本轮保持 ${CUR_AGENT}"
-        echo "::warning::hermes-agent 候选 ${AGENT_LATEST} 低于当前锚点 ${CUR_AGENT}，已拒绝倒退"
+    # 只有明确判出「not 倒退」(no) 才放行；yes / 空串（python 崩溃、被 OOM kill、
+    # 输出异常）一律保持现值 —— fail-closed：拿不准就不动锚点，
+    # 也不能因为判不出来就写进一个可能更旧的内核。
+    if [ "${DOWNGRADE}" != "no" ]; then
+        if [ "${DOWNGRADE}" = "yes" ]; then
+            log "候选 agent ${AGENT_LATEST} 低于当前锚点 ${CUR_AGENT}（上游可能重发旧 tag）—— 拒绝倒退"
+            echo "::warning::hermes-agent 候选 ${AGENT_LATEST} 低于当前锚点 ${CUR_AGENT}，已拒绝倒退"
+        else
+            log "ERROR 倒退判定不可用（DOWNGRADE='${DOWNGRADE}'）—— 保守起见本轮不改 agent 锚点"
+            echo "::error::agent 锚点倒退守卫无法判定（候选=${AGENT_LATEST} 现值=${CUR_AGENT}），已保持现值"
+        fi
         AGENT_LATEST="${CUR_AGENT}"
     fi
 fi

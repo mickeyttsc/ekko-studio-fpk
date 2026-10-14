@@ -473,7 +473,8 @@ echo "✅ bin 入口按 package.json 动态重建（上游改名/新增入口不
 # 依赖被静默跳过 → 残缺内核正常出厂。锚点若混入 +canary/日期式 tag，
 # 包内代码与 hermes_cli 版本显示同样失真。
 
-# 1) 锚点格式：只许 vX.Y.Z（拒绝 +canary 预发布与日期式 v2026.x.y 回潮）
+# 1) 锚点格式：由真源 anchor-ok 判定（vX.Y.Z，或人工显式写的 main；
+#    拒绝 +canary 预发布与日期式 v2026.x.y 回潮）
 if [ -f "$TMP/config/bootstrap/hermes-agent-version.env" ]; then
     ANCHOR="$(grep '^HERMES_AGENT_VERSION=' "$TMP/config/bootstrap/hermes-agent-version.env" | cut -d= -f2 | tr -d '[:space:]' || true)"
     if printf '%s' "$ANCHOR" | grep -q 'canary'; then

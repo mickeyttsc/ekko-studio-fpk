@@ -79,8 +79,8 @@ ensure_hermes_agent_src() {
     rm -rf "$src_dir" "$tmp_tar"
     mkdir -p "$src_dir"
 
-    # 追踪的 agent release 标签已在函数顶部读取为 agent_ver（默认回退 main 保证兼容），
-    # 由 .github/workflows/auto-update.yml 自动与上游最新 release 对齐。
+    # agent_ver 已在函数顶部读取并经 detect-upstream.py anchor-ok 校验（缺失/为空/
+    # 日期式/+canary 都已硬失败），这里只按该标签取包，由 auto-update 与上游对齐。
     local url="https://api.github.com/repos/NousResearch/hermes-agent/tarball/${agent_ver}"
     local attempt=1
     local downloaded=false
@@ -95,29 +95,17 @@ ensure_hermes_agent_src() {
         sleep 5
     done
 
-    # 钉的 release 标签下载失败（如标签被删/网络抖动）时，回退到 main 分支，
-    # 保证离线源码包仍能生成（代价是失去该次的可复现性，仅作兜底）。
-    if [ "$downloaded" != "true" ] && [ "$agent_ver" != "main" ]; then
-        echo "WARNING: 按标签 $agent_ver 下载失败，回退到 main 分支"
-        url="https://api.github.com/repos/NousResearch/hermes-agent/tarball/main"
-        attempt=1
-        while [ $attempt -le 3 ]; do
-            if curl -fsSL --max-time 300 "$url" -o "$tmp_tar" 2>/dev/null; then
-                downloaded=true
-                agent_ver="main"
-                break
-            fi
-            attempt=$((attempt + 1))
-            sleep 5
-        done
-    fi
-
+    # ⛔ 不再回退 main，也不再「静默出一个不含内核的包」——两者都会造出
+    # 「锚点写 vX.Y.Z、内核实为 main 前沿」或「构建绿了但包里没有内核」的产物，
+    # 与 hermes-agent-version.env 的声明（标签下载失败即中止）和 MAINTAINING #9/#26
+    # 的事故模型直接冲突。要降级请人工把锚点显式写成 main（那是明确意图）。
     if [ "$downloaded" != "true" ]; then
-        echo "WARNING: 无法下载 Hermes Agent 源码包（GitHub 网络问题）。"
-        echo "  本次构建不会包含离线源码，NAS 安装时仍会尝试 git clone。"
-        echo "  如需离线包，可手动把 hermes-agent 仓库放到 $src_dir 后再构建。"
+        echo "ERROR: 按锚点 $agent_ver 下载 Hermes Agent 源码包失败（3 次重试耗尽）。" >&2
+        echo "  拒绝回退 main、拒绝产出无内核的包 —— 中止构建。" >&2
+        echo "  排查：标签是否已被上游删除？网络是否可达 api.github.com？" >&2
+        echo "  确需 main 请显式写 config/bootstrap/hermes-agent-version.env 的 HERMES_AGENT_VERSION=main。" >&2
         rm -rf "$src_dir" "$tmp_tar"
-        return 0
+        exit 1
     fi
 
     echo "  下载完成，解压中..."
