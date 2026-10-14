@@ -769,6 +769,31 @@ link_npm_global_bins() {
     return 0
 }
 
+# ── 桌面小窗（iframe）嵌入修复 ───────────────────────────────────────────────
+# 根因：上游 hermes-web-ui 的 dist/server/index.js 安全中间件对 / 硬编码
+#   X-Frame-Options: DENY + CSP frame-ancestors 'none'
+# fnOS 桌面图标小窗模式（ui/config type=iframe）把 http://<nas>:8648/ 嵌进
+# 桌面窗口 iframe，浏览器按上述响应头直接拒绝渲染 → 窗口空白/报错。
+# 上游没有 env 开关，唯一解法是改文件：
+#   XFO DENY -> ALLOWALL（Chromium 忽略该非标值，实际由 CSP frame-ancestors 管控）
+#   CSP frame-ancestors 'none' -> 白名单（fnOS 桌面各入口源 + 内网 + 反代域名）
+# 为什么必须在 cmd/main 里每次启动前重打（而不是只在 install 时打一次）：
+# install_callback / upgrade_callback 用 `cp -a` 把 FPK bundled 的原始
+# node_modules 覆盖回 data/，补丁会被整个冲掉（2026-10-14 实测两次覆盖，
+# 手工补丁丢失、小窗恢复空白）。启动前重打 = 覆盖所有安装/升级/回退路径。
+# 幂等：补丁脚本检测到已打（无 DENY/none）则 no-op；失败不阻断启动
+# （web-ui 本身仍可用，只是小窗不可用），仅记日志。
+patch_webui_frame_headers() {
+    local target="${NODE_PREFIX}/lib/node_modules/hermes-web-ui/dist/server/index.js"
+    local script="${TRIM_APPDEST}/bin/patch-frame-headers.js"
+    [ -f "${target}" ] || { log_msg "frame-headers patch: skip（未找到 ${target}）"; return 0; }
+    [ -f "${script}" ] || { log_msg "frame-headers patch: WARNING 补丁脚本缺失 ${script}，桌面小窗可能空白"; return 0; }
+    [ -x "${NODE_BIN}" ] || { log_msg "frame-headers patch: WARNING node 不可用，跳过"; return 0; }
+    local out
+    out="$("${NODE_BIN}" "${script}" "${target}" 2>&1)"
+    log_msg "frame-headers patch: ${out}"
+}
+
 # ── 端口占用者归属防护（启动前必做）────────────────────────────────────────
 # 官方 CLI（hermes-web-ui.mjs）的 startDaemon() 发现目标端口被占会直接
 # killListeningPids() 杀掉占用进程。若占用者是别的应用（例如 Docker 版
@@ -839,6 +864,16 @@ start_process() {
     # 把 npm-global 里装好的 CLI 兜底软链进 NODE_PREFIX/bin（原本就在 PATH 里），
     # 让 WebUI 的 findCommandPaths() 能反查到 dsh 等编码 Agent 可执行文件。
     link_npm_global_bins
+
+    # 桌面小窗（iframe）嵌入修复：web-ui 对 / 下发 X-Frame-Options: DENY +
+    # CSP frame-ancestors 'none'，fnOS 桌面 iframe 小窗（ui/config type=iframe，
+    # 用户拍板的小窗模式）会被浏览器直接拒绝 → 窗口空白/报错。
+    # 上游无 env 开关（安全头硬编码在 dist/server/index.js 的中间件里），
+    # 只能改文件。必须在【每次启动前】重打：install_callback / upgrade_callback
+    # 用 cp -a 把 bundled 原始 node_modules 覆盖回 data/ 时补丁会被冲掉
+    # （2026-10-14 实测：手工补丁被两次安装覆盖，小窗又变空白）。
+    # 补丁脚本幂等：已打则 no-op，可安全重复执行。
+    patch_webui_frame_headers
 
     # Gateway 存活保障（两道，随包自带）：
     #   A. 写回 web-ui 的 gatewayAutoStart 开关 → web-ui 启动时自己拉起 gateway

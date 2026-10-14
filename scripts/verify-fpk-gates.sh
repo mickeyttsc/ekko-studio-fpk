@@ -175,6 +175,46 @@ then
 fi
 echo "✅ 桌面入口为 iframe 小窗模式（不跳浏览器标签页）"
 
+# ── 桌面小窗 iframe 嵌入补丁三道门禁（2026-10-14 真实事故固化）────────────
+# 事故模型：ui/config 改成 iframe 小窗后，上游 web-ui 对 / 硬编码
+#   X-Frame-Options: DENY + CSP frame-ancestors 'none'
+# → 浏览器拒绝把页面嵌进 fnOS 桌面窗口 → 桌面图标点开是空白/报错。
+# 修复三层，缺一层就会以不同形态复发：
+#   L1 构建期预打（build-fpk.sh 改 bundled 产物）→ 本门禁③校验
+#   L2 运行时自愈（cmd/main 每次启动前重打）→ 本门禁①②校验
+#     为什么必须运行时也打：install/upgrade_callback 用 cp -a 把 bundled
+#     原始 node_modules 覆盖回 data/，L1 的补丁会被整个冲掉
+#     （2026-10-14 实测：手工补丁被两次安装覆盖，小窗恢复空白）。
+#   L3 补丁脚本本体必须随包（app/bin/patch-frame-headers.js）
+# 任缺其一 → 构建红，不让出厂。
+# ① 补丁函数必须在 cmd/main 定义且被 start_process 调用（定义了不调用=没有）
+if ! grep -q '^patch_webui_frame_headers()' "$TMP/cmd/main"; then
+    echo "::error:: cmd/main 缺 patch_webui_frame_headers() —— 重装/升级后补丁被 cp -a 覆盖，桌面小窗恢复空白"
+    exit 1
+fi
+n="$(grep -c '^\s*patch_webui_frame_headers$' "$TMP/cmd/main" || true)"
+if [ "${n:-0}" -lt 1 ]; then
+    echo "::error:: cmd/main 定义了 patch_webui_frame_headers() 但未在 start_process 中调用"
+    exit 1
+fi
+echo "✅ cmd/main 启动前自愈重打 iframe 补丁（覆盖重装/升级覆盖路径）"
+# ② 补丁脚本必须随包（cmd/main 从 ${TRIM_APPDEST}/bin/ 调它）
+if ! grep -qE '^bin/patch-frame-headers\.js$' "$TMP/inner.list"; then
+    echo "::error:: 内层缺 bin/patch-frame-headers.js —— cmd/main 的自愈调用找不到脚本，桌面小窗会空白"
+    exit 1
+fi
+echo "✅ iframe 补丁脚本随包（bin/patch-frame-headers.js）"
+# ③ bundled 产物出厂即带补丁（fail-closed：内层 index.js 必须无 DENY/none）
+#    grep -c 读完全部输入不早退，无 SIGPIPE 风险，可安全用于管道。
+XFO_DENY_LEFT="$(tar xzOf "$TMP/app.tgz" node/lib/node_modules/hermes-web-ui/dist/server/index.js 2>/dev/null | grep -c '"X-Frame-Options","DENY"' || true)"
+FA_NONE_LEFT="$(tar xzOf "$TMP/app.tgz" node/lib/node_modules/hermes-web-ui/dist/server/index.js 2>/dev/null | grep -c "frame-ancestors 'none'" || true)"
+ALLOWALL_N="$(tar xzOf "$TMP/app.tgz" node/lib/node_modules/hermes-web-ui/dist/server/index.js 2>/dev/null | grep -c '"X-Frame-Options","ALLOWALL"' || true)"
+if [ "${XFO_DENY_LEFT:-0}" != "0" ] || [ "${FA_NONE_LEFT:-0}" != "0" ] || [ "${ALLOWALL_N:-0}" = "0" ]; then
+    echo "::error:: bundled index.js 未打 iframe 补丁（XFO DENY 残留=${XFO_DENY_LEFT}, frame-ancestors none 残留=${FA_NONE_LEFT}, ALLOWALL=${ALLOWALL_N}）—— 全新安装桌面小窗即空白，构建中止"
+    exit 1
+fi
+echo "✅ bundled 产物出厂带 iframe 补丁（XFO=ALLOWALL, frame-ancestors 白名单）"
+
 # 三个向导文件必须存在且是合法 JSON（安装/卸载/配置界面的全部内容都在这）
 for w in install uninstall config; do
     if ! grep -qE "^wizard/${w}$" "$TMP/outer.list"; then
