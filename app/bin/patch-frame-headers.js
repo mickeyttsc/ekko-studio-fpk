@@ -24,12 +24,13 @@
 const fs = require('fs');
 const os = require('os');
 
-const TARGET = process.argv[2];
+// 参数解析：目标路径 = 第一个非 --flag 参数；--static-only 位置无关
+// （构建期传它是为了避免把构建机地址烤进产物；曾因写死 argv[2] 取目标而报 not found）
+const _args = process.argv.slice(2);
+const TARGET = _args.find((a) => !a.startsWith('--'));
 // --static-only: 只写「与机器无关」的白名单（域名/localhost），不枚举本机地址。
-// 构建期用它，避免把 CI runner 的地址烤进产物（曾实测把 <BUILD-IP>/fe80::… 写进包，
-// 而运行时旧脚本又不会刷新 → 真实入口 <LAN-IP>/全局 IPv6 反而被 CSP 拦）。
-const STATIC_ONLY = process.argv.includes('--static-only');
-if (!TARGET) { console.error('usage: patch-frame-headers.js <index.js>'); process.exit(2); }
+const STATIC_ONLY = _args.includes('--static-only');
+if (!TARGET) { console.error('usage: patch-frame-headers.js [--static-only] <index.js>'); process.exit(2); }
 if (!fs.existsSync(TARGET)) { console.error('not found: ' + TARGET); process.exit(1); }
 
 let s = fs.readFileSync(TARGET, 'utf8');
