@@ -39,11 +39,21 @@ ensure_hermes_agent_src() {
     local src_dir="$ROOT/app/hermes-agent-src"
     local marker="$src_dir/.offline-bundle"
     local ref_marker="$src_dir/.bundled-agent-ref"
-    local agent_ver="main"
+    local agent_ver=""
     local agent_env="$ROOT/config/bootstrap/hermes-agent-version.env"
     if [ -f "$agent_env" ]; then
-        agent_ver="$(grep -E '^HERMES_AGENT_VERSION=' "$agent_env" | awk -F'=' '{print $2}' | tr -d ' ')"
-        [ -z "$agent_ver" ] && agent_ver="main"
+        agent_ver="$(grep -E '^HERMES_AGENT_VERSION=' "$agent_env" | awk -F'=' '{print $2}' | tr -d '[:space:]')"
+    fi
+    # 锚点缺失/为空一律硬失败：静默兜底成 main 会造出「锚点写 vX.Y.Z、内核实为 main
+    # 前沿」的不可复现包（与 build.yml 与锚点 env 的声明相反）。确要用 main 就显式写。
+    if [ -z "$agent_ver" ]; then
+        echo "ERROR: $agent_env 缺 HERMES_AGENT_VERSION 或值为空 —— 拒绝构建（不使用隐式 main 兜底；确需 main 请显式写 HERMES_AGENT_VERSION=main）" >&2
+        exit 1
+    fi
+    # 口径由唯一真源判定（不在本文件重抄正则）
+    if ! python3 "$ROOT/scripts/detect-upstream.py" anchor-ok "$agent_ver"; then
+        echo "ERROR: HERMES_AGENT_VERSION='$agent_ver' 非法（只许 vX.Y.Z 正式语义化标签或显式 main）" >&2
+        exit 1
     fi
     local tmp_tar="$ROOT/.hermes-agent.tar.gz"
 

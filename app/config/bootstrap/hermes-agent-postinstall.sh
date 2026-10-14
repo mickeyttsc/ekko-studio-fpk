@@ -171,6 +171,13 @@ if [ -z "$BASE" ] || [ "$BASE" = "$ANCHOR" ]; then
     echo "         （Studio 将显示占位符版本，直至下一次 hermes update）"
     exit 0
 fi
+# 锚点被手改成日期式（major 是 4 位年份，如 2026.9.24）时也不写 stamp ——
+# 权威口径在 CI 侧（scripts/detect-upstream.py anchor-ok，装机不附带），
+# 这里只做装机侧兜底防御：宁可显示占位符，也不写一个与内核真实版本无关的数字。
+if printf '%s' "$BASE" | grep -qE '^[0-9]{4}\.'; then
+    echo "WARNING: 锚点 '${ANCHOR}' 是日期式标签（4 位年份 major），不写 install-stamp"
+    exit 0
+fi
 if [ ! -f "$STAMP_SCRIPT" ]; then
     echo "WARNING: $STAMP_SCRIPT 不存在（内核无此脚本），跳过 stamp 补写"
     exit 0

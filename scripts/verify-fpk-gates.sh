@@ -480,8 +480,16 @@ if [ -f "$TMP/config/bootstrap/hermes-agent-version.env" ]; then
         echo "::error:: HERMES_AGENT_VERSION 锚点含 +canary 预发布标签: '$ANCHOR' —— 打包只跟正式 release，构建中止"
         exit 1
     fi
-    if ! printf '%s' "$ANCHOR" | grep -qE '^(v[0-9]+\.[0-9]+\.[0-9]+|main)$'; then
-        echo "::error:: HERMES_AGENT_VERSION 锚点格式非法: '$ANCHOR'（要求 vX.Y.Z 正式语义化标签或 main；日期式 v2026.x.y 已停止跟随）"
+    # 口径从唯一真源取（detect-upstream.py anchor-ok），不在本文件重抄正则 ——
+    # 2026-10-15 实测：同一规则曾有手抄三份的副本，收紧时漏改本处，导致
+    # 「注释声明拒绝日期式、实现照样放行」。取值失败也必须 fail-closed。
+    DETECT="$(dirname "$0")/detect-upstream.py"
+    if [ ! -f "$DETECT" ]; then
+        echo "::error:: 缺 scripts/detect-upstream.py，无法校验锚点口径（拒绝放行）"
+        exit 1
+    fi
+    if ! python3 "$DETECT" anchor-ok "$ANCHOR"; then
+        echo "::error:: HERMES_AGENT_VERSION 锚点非法: '$ANCHOR'（见上：只许 vX.Y.Z 正式语义化标签或显式 main；日期式 v2026.x.y 与 +canary 已停止跟随）"
         exit 1
     fi
     echo "✅ Agent 版本锚点合规 ($ANCHOR)"

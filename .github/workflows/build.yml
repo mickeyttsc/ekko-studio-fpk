@@ -252,14 +252,19 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          DESIRED_REF="$(grep '^HERMES_AGENT_VERSION=' config/bootstrap/hermes-agent-version.env | cut -d= -f2)"
-          [ -z "$DESIRED_REF" ] && DESIRED_REF="main"
-          # 锚点格式硬校验：vX.Y.Z（major 最多 3 位）或 main，别的（+canary/日期式/空垃圾）一律红
-          # ⚠️ major 不能写 [0-9]+ —— 那会放行上游的日期式 tag（v2026.9.24，4 位年份），
-          #    与本行注释的声明矛盾。口径与 scripts/detect-upstream.py 的 AGENT_SEMVER_RE
-          #    （^v\d{1,3}\.[0-9]+\.[0-9]+$）保持一致，两侧行为由 selftest 钉住。
-          if ! printf '%s' "$DESIRED_REF" | grep -qE '^(v[0-9]{1,3}\.[0-9]+\.[0-9]+|main)$'; then
-            echo "::error:: HERMES_AGENT_VERSION 锚点非法: '$DESIRED_REF'（允许 vX.Y.Z 或 main；拒绝 +canary 预发布与日期式 tag）"
+          DESIRED_REF="$(grep '^HERMES_AGENT_VERSION=' config/bootstrap/hermes-agent-version.env | cut -d= -f2 | tr -d '[:space:]')"
+          # ⚠️ 空锚点绝不再静默兜底成 main —— 本文件下方明确写着「main 只允许作为
+          #    显式锚点值」，而 auto-update 链路从不写 main：静默兜底只会造出
+          #    「锚点为空、内核实为 main 前沿」的不可复现包（与声明相反）。
+          if [ -z "$DESIRED_REF" ]; then
+            echo "::error:: HERMES_AGENT_VERSION 为空或缺失（要跟进上游请由 auto-update 写入；确需 main 请把 HERMES_AGENT_VERSION=main 显式写进锚点文件）"
+            exit 1
+          fi
+          # 锚点口径由唯一真源判定：scripts/detect-upstream.py 的 anchor-ok
+          # （major 最多 3 位，拒日期式 v2026.x.y 与 +canary；main 仅限显式写入）。
+          # 不在本文件重抄正则 —— 2026-10-15 实测过手抄三处漏改一处的后果。
+          if ! python3 scripts/detect-upstream.py anchor-ok "$DESIRED_REF"; then
+            echo "::error:: HERMES_AGENT_VERSION 锚点非法: '$DESIRED_REF'（见上 anchor-ok 判定）"
             exit 1
           fi
           REF_MARKER="app/hermes-agent-src/.bundled-agent-ref"

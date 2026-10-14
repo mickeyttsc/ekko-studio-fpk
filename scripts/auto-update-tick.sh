@@ -32,6 +32,8 @@ log() { echo "[$(date -u '+%H:%M:%S')] $*"; }
 # [0-9]+），日期式 tag 会被当成「最新正式版」写进锚点并被 CI 打包 —— 所以这里
 # 失败就【本轮不写锚点】，把回归挡在源头，而不是留下一个装错内核的包。
 if ! python3 scripts/detect-upstream.py selftest >/dev/null 2>&1; then
+    # ::error:: 注解让它出现在 Actions 的 Annotations 区，而不是埋在 6 小时日志里
+    echo "::error::detect-upstream.py selftest 失败 —— 标签口径回归，本轮拒绝写锚点（长驻 job 会继续空转，必须人工修）"
     log "ERROR detect-upstream.py selftest 失败（标签过滤器行为与声明不符），本轮拒绝写锚点"
     python3 scripts/detect-upstream.py selftest 2>&1 | tail -6 | while IFS= read -r l; do log "  $l"; done
     exit 0
@@ -45,6 +47,9 @@ fi
 
 AGENT_LATEST="$(python3 scripts/detect-upstream.py agent 2>/dev/null)"
 if [ -z "${AGENT_LATEST}" ]; then
+    # 收紧口径后的新失败模式：上游若整体退回日期式命名，语义式候选为空，
+    # 锚点会【静默冻结】在当前值、长驻 job 空转 —— 必须显式喊出来。
+    echo "::warning::hermes-agent 无可用的语义化正式 release 标签（上游可能改用日期式命名）—— 锚点保持 ${CUR_AGENT:-未知} 不变，需人工确认跟随策略"
     log "WARN 未能解析 hermes-agent 最新 release 标签，本轮跳过"
     exit 0
 fi
@@ -74,6 +79,37 @@ PIN_ENV="config/upstream/${WEBUI_ASSET}.env"
 
 CHANGED=0
 if [ "${WEBUI_LATEST}" != "${CUR_WEBUI}" ]; then CHANGED=1; fi
+
+# ── agent 锚点单调性守卫 ─────────────────────────────────────────────────────
+# 「published_at 最新」≠「版本最高」：上游重新发布一个旧 tag（backport 补丁、
+# 或误重发）会让它成为 published_at 最新者，照写就把内核锚点【倒退】了，
+# 进而打包出比现状更旧的内核。故候选低于当前锚点时保持现值并显式告警；
+# 确需回退请人工把锚点写成目标值（人工动作就是明确意图）。
+if [ -n "${CUR_AGENT}" ] && [ "${AGENT_LATEST}" != "${CUR_AGENT}" ]; then
+    DOWNGRADE="$(python3 - "${CUR_AGENT}" "${AGENT_LATEST}" <<'PY'
+import sys
+def key(t):
+    t = t.strip()
+    if not t.startswith("v"):
+        return None                      # main 等非 vX.Y.Z：不参与比较
+    try:
+        p = tuple(int(x) for x in t[1:].split("."))
+    except ValueError:
+        return None
+    return p if len(p) == 3 else None
+a, b = key(sys.argv[1]), key(sys.argv[2])
+# 输出而非退出码承载结论 —— 早前用 sys.exit(1 if 倒退 else 0) 配 `if cmd; then 回退`
+# 是极性反的：不是倒退时退出 0，反而每轮都把候选打回现值，自动升级通道被静默锁死。
+print("yes" if (a is not None and b is not None and b < a) else "no")
+PY
+)"
+    if [ "${DOWNGRADE}" = "yes" ]; then
+        log "候选 agent ${AGENT_LATEST} 低于当前锚点 ${CUR_AGENT}（上游可能重发旧 tag）—— 拒绝倒退，本轮保持 ${CUR_AGENT}"
+        echo "::warning::hermes-agent 候选 ${AGENT_LATEST} 低于当前锚点 ${CUR_AGENT}，已拒绝倒退"
+        AGENT_LATEST="${CUR_AGENT}"
+    fi
+fi
+
 if [ "${AGENT_LATEST}" != "${CUR_AGENT}" ]; then CHANGED=1; fi
 PIN_STALE=0
 if [ ! -f "$PIN_ENV" ] || ! grep -qF "HERMES_WEB_UI_SHA256=${WEBUI_SHA}" "$PIN_ENV" 2>/dev/null; then

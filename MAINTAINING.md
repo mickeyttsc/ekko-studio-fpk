@@ -203,7 +203,7 @@ CLI 无 upgrade 子命令）。可行路径 = **应用中心 UI 手动安装新 
 | 32 | **向导文案与实现不符** —— 上游写「首次安装会自动下载 Node.js 运行时并全局安装 hermes-web-ui，请耐心等待」，实际是内置 bundled 运行时离线复制，几秒完成 | 文案按真实行为改写（内置依赖、安装很快、首启后台装内核） |
 | 33 | **配置向导缺失** —— 上游没有 `wizard/config`，装完无法在应用设置里调整端口/微信策略 | 新增 `wizard/config` + `config_callback` 真正落地变更 |
 | 34 | **上游在 `install_callback` 里注入 `trim-cli` 技能** —— `rm -rf` 用户技能目录后覆盖，会打回旧版 | 不内置任何技能；CI 门禁查内外两层 |
-| 35 | **门禁「声明与实现脱节」—— 注释说拒绝日期式 tag，正则实际放行** —— `detect-upstream.py` 的 `AGENT_SEMVER_RE` 与 `build.yml` 锚点门禁都写成 `^v\d+\.\d+\.\d+$`，而上游 hermes-agent 的历史日期式 tag（`v2026.9.24`，major 是 4 位年份）**同样匹配**。当时没出事纯属侥幸：语义化版本恰好发布更晚、按 `published_at` 排序赢了。上游一旦再发日期式 tag，它会立刻赢过语义化版本被写进锚点并被打包，而两侧注释都写着「拒绝日期式」 | 限 major 最多 3 位（`^v\d{1,3}\.\d+\.\d+$`，两侧同口径；既不放过 4 位年份，也不误伤将来的 `v100.x.y`）；新增 `detect-upstream.py selftest` 把「接受/拒绝」钉成 12 条可执行用例，`build.yml` 构建前置跑、`auto-update-tick.sh` 在写锚点前跑，任一不符即中断构建/本轮不写锚点 |
+| 35 | **口径手抄多份 + 自检自证范围造假** —— 「只跟语义化 tag、拒绝日期式」这条规则同时抄在 `detect-upstream.py`、`build.yml`、`verify-fpk-gates.sh` 三处，且都写成 `v[0-9]+`/`\d+` 宽松形：注释与报错文本声明拒绝日期式，实现却放行上游的 `v2026.9.24`（major 是 4 位年份；上游 39 个 release 里 **36 个是日期式**）。当时没出事只因语义式恰好发布更晚。更糟的是第一版修复只收紧了两处、漏了第三处，而 selftest 只测自己的 Python 常量 —— 把 build.yml 改回宽松写法后 selftest 仍全绿，注释里「两侧由 selftest 钉住」是假的。另有空锚点静默兜底 `main`（与同文件「main 只允许显式写入」矛盾）、`published_at` 最新≠版本最高导致的锚点倒退、上游改回日期式后静默冻结 | **口径收敛为单一真源**：`detect-upstream.py` 的 `AGENT_TAG_PATTERN`/`ANCHOR_ERE`，限 major 最多 3 位（排 4 位年份又不误伤将来的 `v100.x.y`）；shell 侧一律调 `anchor-ok`/`gate-regex`，不再自带正则。**selftest 升级为四项契约**：① 标签串逐样本（含尾部换行脏值用 `fullmatch`）② 选取逻辑用构造 release 样本（prerelease/draft 过滤、`published_at` 排序、日期式让位）③ `ANCHOR_ERE` 与 Python 口径逐样本等价（且必须接受 `main`、拒绝空值）④ **全仓禁止宽松字面副本 + 消费方必须引用真源**。空锚点改为硬失败；tick 增加**倒退守卫**；两处静默失败路径打 `::error::`/`::warning::` 注解（埋在 6 小时长驻日志里等于没有）|
 
 ---
 
