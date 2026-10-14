@@ -360,13 +360,12 @@ jobs:
             dist/fnos-${{ env.APP_NAME }}.fpk
             dist/fnos-${{ env.APP_NAME }}_v${{ steps.target_version.outputs.target_version }}.fpk
           body: |
-            Ekko Studio for fnOS（官方预构建产物 + bundled node_modules，非 Docker）— 自动构建
+            Ekko Studio for fnOS — 滚动最新版（每次构建自动覆盖）
 
-            - 包版本（迭代号）：`${{ steps.target_version.outputs.target_version }}`
-            - 提交：`${{ github.sha }}`
-            - 生成时间：${{ github.event.head_commit.timestamp }}
+            - 包名：hermes-studio ｜ 端口：8648
+            - 当前版本：`${{ steps.target_version.outputs.target_version }}` ｜ 提交：`${{ github.sha }}` ｜ 生成时间：${{ github.event.head_commit.timestamp }}
+            - 内核 / 上游版本与改动清单：见仓库 README
 
-            > ⚠️ 这是滚动预发布版本，每次 push 到 main 会覆盖 `fnos-ekko-studio.fpk`。
             > 固定版本请下载带版本号的附件 `fnos-ekko-studio_v${{ steps.target_version.outputs.target_version }}.fpk`。
 
       # 稳定版 Release：每次构建都发（tag = v<版本号>）。
@@ -380,22 +379,19 @@ jobs:
           cat > /tmp/relnotes.md <<'NOTE'
           Ekko Studio for fnOS — 稳定版 v${{ steps.target_version.outputs.target_version }}
 
-          **打包追踪的上游版本**（由 auto-update.yml 自动对齐）：hermes-web-ui `__WEBUI__` ｜ hermes-agent `__AGENT__`
+          - 包名（appname）：hermes-studio ｜ 显示名：Ekko Studio
+          - 服务端口：8648（可在应用设置中修改）
+          - 内置内核：hermes-agent `__AGENT__`（离线源码包，首启免联网）｜ 上游 web-ui `__WEBUI__`
 
-          ## 说明
-          - 跟随官方 GitHub Release 预构建产物（EKKOLearnAI/ekko-studio）自动对齐 hermes-web-ui 版本，比 npm 发布更及时。
-          - 上游产物经 sha256 校验（固定值入库 `config/upstream/`，构建期逐字比对）。
-          - 内置 Hermes Agent 离线源码包（按 NousResearch/hermes-agent 最新 release 标签钉版本），安装时跳过 GitHub git clone，适合 NAS 弱网环境。
-          - Agent browser tools + TUI 依赖预装进 FPK，首启跳过后台 npm install，启动更快。
-          - bundled node 运行时不入库，CI 用 Node v24 编译含原生 node-pty，安装走离线复制，避免 fnOS 缺 gcc 导致安装卡死。
+          **本包改动（相对上游原版）**：桌面小窗修复 ｜ 白名单零隐私绑定 ｜ IPv6 双栈 + CORS ｜ 依赖预装离线安装 ｜ 端口可改 + 配置向导 ｜ 内核更新通道 + 服务守护 ｜ 卸载如实清理。
+          完整清单见仓库 README。
 
-          ## 安装说明
+          ## 安装
           1. 飞牛应用中心 -> 手动安装 -> 选择本 fpk。
-          2. 安装后首次启动会自动在后台安装 Hermes Agent（约 1-3 分钟），请稍候。
-          3. 默认监听 8648 端口，点击应用图标在 fnOS 桌面小窗（内嵌窗口）打开。
+          2. 首次启动后台完成内核就绪（内置离线包，约 1-3 分钟）。
+          3. 点击应用图标在 fnOS 桌面小窗打开（默认端口 8648）。
 
-          固定版本请从本 Release 附件下载 fnos-ekko-studio_v${{ steps.target_version.outputs.target_version }}.fpk；
-          最新滚动版见 Release latest。
+          固定版本附件：fnos-ekko-studio_v${{ steps.target_version.outputs.target_version }}.fpk ｜ 滚动最新版见 Release latest。
           NOTE
           sed -i "s/__WEBUI__/${HERMES_WEBUI_VER}/; s/__AGENT__/${HERMES_AGENT_VER}/" /tmp/relnotes.md
           echo "稳定版发布说明已生成：/tmp/relnotes.md"
