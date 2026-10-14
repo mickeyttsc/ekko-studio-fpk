@@ -630,7 +630,24 @@ check_python() {
         return 0
     fi
 
-    log_info "Checking Python $PYTHON_VERSION..."
+    # FPK-AUTO-FLOOR: Python 地板自动跟随上游 pyproject marker（免人工改死值）。
+    # 上游把核心依赖 gate 在 `python_version >= 'X.Y'`；venv 必须 >= 该值，
+    # 否则 marker 静默跳过依赖 → 残缺内核。上游哪天把核心跳 3.15，这里自动抬。
+    # 语义 = 取所有 >= marker 的【最小】值：核心 marker 恒为同一地板；个别面向
+    # 未来版本的实验依赖（>=3.99 之类）不得把地板推高造成 uv 找不到的假故障。
+    # 高于静态默认值才抬；解析失败保持默认（终保 = postinstall 动态完整性检查，
+    # 装机当场红，不会静默出厂）。
+    if [ -f "${INSTALL_DIR:-}/pyproject.toml" ]; then
+        _floor="$(sed -n "s/.*python_version[[:space:]]*>=[[:space:]]*'\([0-9]\+\.[0-9]\+\)'.*/\1/p" \
+                  "$INSTALL_DIR/pyproject.toml" 2>/dev/null | sort -V | head -1)"
+        if [ -n "$_floor" ] && [ "$_floor" != "$PYTHON_VERSION" ] && \
+           [ "$(printf '%s\n%s\n' "$PYTHON_VERSION" "$_floor" | sort -V | tail -1)" = "$_floor" ]; then
+            log_info "FPK-AUTO-FLOOR: raising Python floor per upstream pyproject markers: $PYTHON_VERSION -> $_floor"
+            PYTHON_VERSION="$_floor"
+        fi
+    fi
+
+log_info "Checking Python $PYTHON_VERSION..."
 
     # Let uv handle Python — it can download and manage Python versions
     # First check if a suitable Python is already available

@@ -396,6 +396,12 @@ if [ -f "$TMP/config/bootstrap/hermes-agent-install.sh" ]; then
         exit 1
     fi
     echo "✅ vendored install.sh Python 地板 = $PYV (>= 3.14)"
+    # 动态地板块必须活着：上游核心 marker 跳 3.15 时全靠它自动抬；
+    # re-vendor 上游脚本会整段抹掉 FPK-AUTO-FLOOR → 回到人工断点，必须红。
+    if ! grep -q 'FPK-AUTO-FLOOR' "$TMP/config/bootstrap/hermes-agent-install.sh"; then
+        echo "::error:: vendored install.sh 缺 FPK-AUTO-FLOOR 动态地板块（被 re-vendor 抹除？）——上游跳版本时将需人工改死值，构建中止"
+        exit 1
+    fi
 else
     echo "::error:: 内层缺 config/bootstrap/hermes-agent-install.sh（bundled 安装器丢失）"
     exit 1
@@ -415,7 +421,16 @@ if ! grep -qE 'fail "post-install kernel verification failed' "$TMP/cmd/install_
     echo "::error:: install_callback 对 postinstall 校验失败只是警告未 fail —— 校验形同虚设，构建中止"
     exit 1
 fi
-echo "✅ 装后内核完整性校验已内嵌且失败即判安装失败"
+if ! grep -q 'FPK-DYNFLOOR' "$TMP/config/bootstrap/hermes-agent-postinstall.sh" 2>/dev/null \
+   || ! grep -q 'FPK-DYNDEPS' "$TMP/config/bootstrap/hermes-agent-postinstall.sh" 2>/dev/null; then
+    tar xzf "$TMP/app.tgz" -C "$TMP" config/bootstrap/hermes-agent-postinstall.sh 2>/dev/null || true
+    if ! grep -q 'FPK-DYNFLOOR' "$TMP/config/bootstrap/hermes-agent-postinstall.sh" 2>/dev/null \
+       || ! grep -q 'FPK-DYNDEPS' "$TMP/config/bootstrap/hermes-agent-postinstall.sh" 2>/dev/null; then
+        echo "::error:: postinstall 缺 FPK-DYNFLOOR/FPK-DYNDEPS 动态校验 —— 上游改 marker/增删依赖将回到人工断点，构建中止"
+        exit 1
+    fi
+fi
+echo "✅ 装后内核完整性校验已内嵌且失败即判安装失败（动态地板+动态依赖完整性）"
 
 # ── 反自检：确保上面的门禁真的会拦 ──
 # 所有检查都依赖 grep 的返回值。若有人改回 `echo "$BIG" | grep -q ...`，
