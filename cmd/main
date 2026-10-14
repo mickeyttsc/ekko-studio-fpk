@@ -826,6 +826,44 @@ check_port_owner() {
     return 0
 }
 
+# ── 启动前确保端口真的空出来（防「额外运行实例」占端口）─────────────────────
+# 事故模型（2026-10-14 实测）：升级/回退期间上一版实例仍在监听 8648，新实例
+# bootstrap 阶段 EADDRINUSE 直接 FATAL 退出 → 应用中心显示运行中却无人服务，
+# 用户点桌面图标打不开、访问网址得到空白页；日志里连出 5 次 EADDRINUSE。
+# clean_residual_processes 的 pkill 按 cmdline 路径模式匹配，换过路径/父进程
+# 已死等情况下会漏杀，所以这里以【端口实际占用者】为准兜底：
+#   属于本应用 → TERM/KILL 并等待释放；属于别的应用 → 拒绝启动
+#   （与 check_port_owner 同一安全语义：绝不默默杀别人）。
+ensure_port_released() {
+    command -v ss >/dev/null 2>&1 || return 0
+    local pid occ_cmd w
+    pid="$(ss -lntpH "sport = :${PORT}" 2>/dev/null | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)"
+    [ -z "${pid}" ] && return 0
+    occ_cmd="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null)"
+    case "${occ_cmd}" in
+        *"${NODE_PREFIX}/lib/node_modules/hermes-web-ui"*|*"${HERMES_AGENT_ROOT}/venv/bin/hermes"*)
+            log_msg "port ${PORT} still held by our stale instance (PID ${pid}) -> terminating"
+            kill -TERM "${pid}" 2>/dev/null || true
+            w=0
+            while [ ${w} -lt 20 ]; do
+                if ! ss -lntH "sport = :${PORT}" 2>/dev/null | grep -q .; then
+                    log_msg "port ${PORT} released"
+                    return 0
+                fi
+                sleep 0.5
+                w=$((w + 1))
+            done
+            kill -9 "${pid}" 2>/dev/null || true
+            sleep 1
+            ;;
+        *)
+            log_msg "ERROR: port ${PORT} held by another application (PID ${pid}): ${occ_cmd}"
+            return 1
+            ;;
+    esac
+    return 0
+}
+
 start_process() {
     # 启动前强制清理：杀掉所有 Hermes 相关残留进程、释放 8648 端口、
     # 清理 socket/PID/旧日志。这能解决"v18 能启动但页面打不开"、
@@ -886,6 +924,11 @@ start_process() {
     ensure_agent_update_channel
 
     log_msg "starting hermes-web-ui on port ${PORT} ..."
+    # 启动前以「端口实际占用者」为准兜底清理（防上一版实例占着 8648 让新实例
+    # EADDRINUSE 假启动 —— 见 ensure_port_released 注释里的 2026-10-14 事故）。
+    if ! ensure_port_released; then
+        return 1
+    fi
     # 官方 CLI 自带 daemon，--no-open 避免 NAS 上尝试打开浏览器。
     # 使用 ${NODE_BIN} 显式执行 .mjs，避免 shebang/执行权限在某些环境不一致。
     nohup "${NODE_BIN}" "${HERMES_BIN}" start --port "$PORT" --no-open >> "${LOG_FILE}" 2>&1 &
@@ -900,8 +943,15 @@ start_process() {
             fi
             return 0
         fi
-        # 兜底：通过 server.log 判断 bootstrap 是否已就绪
-        if grep -qE "listening on 0\.0\.0\.0:${PORT}|app\.listen called" "${WEB_UI_HOME}/server.log" 2>/dev/null; then
+        # 兜底：通过 server.log 判断 bootstrap 是否已就绪 —— 必须 fail-closed。
+        # ⛔ 不能只看 "listening on 0.0.0.0:PORT"：该行由 bootstrap 在【真正 bind 之前】
+        #    打印，绑定失败（端口被旧实例占着）的实例也会留下它，随后才打 FATAL。
+        #    只看这一行 → cmd/main 误报「started」，应用中心跟着显示运行中，
+        #    而实际没有任何进程服务该端口（桌面小窗/网页打不开、访问网址得到空白页）。
+        #    2026-10-14 实测事故：21:32-21:43 连续 5 次 EADDRINUSE，每次都被误判为启动成功。
+        #    故加「致命错误否决」：日志里出现 FATAL/EADDRINUSE/bootstrap-error 即视为未启动。
+        if ! grep -qE "FATAL: Failed to start|EADDRINUSE|bootstrap-error" "${WEB_UI_HOME}/server.log" 2>/dev/null \
+           && grep -qE "listening on 0\.0\.0\.0:${PORT}|app\.listen called" "${WEB_UI_HOME}/server.log" 2>/dev/null; then
             log_msg "started, server log reports listening on port ${PORT}"
             if [ "${agent_ready}" != "1" ]; then
                 start_agent_ready_watchdog

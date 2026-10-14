@@ -215,6 +215,29 @@ if [ "${XFO_DENY_LEFT:-0}" != "0" ] || [ "${FA_NONE_LEFT:-0}" != "0" ] || [ "${A
 fi
 echo "✅ bundled 产物出厂带 iframe 补丁（XFO=ALLOWALL, frame-ancestors 白名单）"
 
+# ── 启动健康判定 fail-closed + 端口释放门禁（2026-10-14 假启动事故固化）──
+# 事故模型：上一版实例仍占 8648 → 新实例 bootstrap 打「listening on 0.0.0.0:PORT」
+# 后 EADDRINUSE 直接 FATAL 退出。cmd/main 只 grep 那一行 → 误报「started」，
+# 应用中心显示运行中而实际无人服务：桌面图标打不开、访问网址得空白页。
+# 两道修复都必须随包，否则同一形态复发：
+#   ① 健康判定必须带致命错误否决（fail-closed），不能只看 listening 行
+#   ② 启动前必须以端口实际占用者为准释放端口（防旧实例占端口）
+if ! grep -q 'FATAL: Failed to start' "$TMP/main.code"; then
+    echo "::error:: cmd/main 的启动健康判定缺致命错误否决 —— EADDRINUSE 假启动会被误报成 started（应用中心显示运行中但无人服务）"
+    exit 1
+fi
+echo "✅ 启动健康判定 fail-closed（FATAL/EADDRINUSE 一律不算启动成功）"
+if ! grep -q '^ensure_port_released()' "$TMP/main.code"; then
+    echo "::error:: cmd/main 缺 ensure_port_released() —— 旧实例占端口会让新实例假启动"
+    exit 1
+fi
+m="$(grep -c '^\s*ensure_port_released$' "$TMP/main.code" || true)"
+if [ "${m:-0}" -lt 1 ]; then
+    echo "::error:: cmd/main 定义了 ensure_port_released() 但未在 start_process 中调用"
+    exit 1
+fi
+echo "✅ 启动前以端口实际占用者为准释放端口（属于本应用才杀，绝不误杀他应用）"
+
 # 三个向导文件必须存在且是合法 JSON（安装/卸载/配置界面的全部内容都在这）
 for w in install uninstall config; do
     if ! grep -qE "^wizard/${w}$" "$TMP/outer.list"; then
