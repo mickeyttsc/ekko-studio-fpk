@@ -192,9 +192,9 @@ if ! grep -q '^patch_webui_frame_headers()' "$TMP/cmd/main"; then
     echo "::error:: cmd/main 缺 patch_webui_frame_headers() —— 重装/升级后补丁被 cp -a 覆盖，桌面小窗恢复空白"
     exit 1
 fi
-n="$(grep -c '^\s*patch_webui_frame_headers$' "$TMP/cmd/main" || true)"
-if [ "${n:-0}" -lt 1 ]; then
-    echo "::error:: cmd/main 定义了 patch_webui_frame_headers() 但未在 start_process 中调用"
+n="$(grep -c 'patch_webui_frame_headers' "$TMP/main.code" || true)"
+if [ "${n:-0}" -lt 2 ]; then
+    echo "::error:: cmd/main 定义了 patch_webui_frame_headers() 但未在 start_process 中调用（出现 ${n:-0} 次，应 ≥2：定义+调用）"
     exit 1
 fi
 echo "✅ cmd/main 启动前自愈重打 iframe 补丁（覆盖重装/升级覆盖路径）"
@@ -231,9 +231,9 @@ if ! grep -q '^ensure_port_released()' "$TMP/main.code"; then
     echo "::error:: cmd/main 缺 ensure_port_released() —— 旧实例占端口会让新实例假启动"
     exit 1
 fi
-m="$(grep -c '^\s*ensure_port_released$' "$TMP/main.code" || true)"
-if [ "${m:-0}" -lt 1 ]; then
-    echo "::error:: cmd/main 定义了 ensure_port_released() 但未在 start_process 中调用"
+m="$(grep -c 'ensure_port_released' "$TMP/main.code" || true)"
+if [ "${m:-0}" -lt 2 ]; then
+    echo "::error:: cmd/main 定义了 ensure_port_released() 但未在 start_process 中调用（出现 ${m:-0} 次，应 ≥2：定义+调用）"
     exit 1
 fi
 echo "✅ 启动前以端口实际占用者为准释放端口（属于本应用才杀，绝不误杀他应用）"
