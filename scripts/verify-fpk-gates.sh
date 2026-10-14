@@ -156,6 +156,25 @@ then
 fi
 echo "✅ ui/config protocol 显式声明（入口 url 协议头完整）"
 
+# 桌面入口必须是 iframe（小窗模式）：type=url 会跳新浏览器标签页，
+# 用户明确要求点击图标在 fnOS 桌面窗口内嵌打开（2026-10-14 拍板）。
+# 防止重新 fnpack create / 模板回退把入口改回 url 造成行为回潮。
+if ! python3 - "$TMP/ui/config" <<'PY'
+import json, sys
+cfg = json.load(open(sys.argv[1], encoding='utf-8'))
+bad = [n for n, it in (cfg.get('.url') or {}).items()
+       if it.get('port') and it.get('type') != 'iframe']
+if bad:
+    print(f"入口 {bad} type!=iframe（桌面图标会跳浏览器标签页而非小窗）", file=sys.stderr)
+    sys.exit(1)
+sys.exit(0)
+PY
+then
+    echo "::error:: ui/config 带 port 的入口必须 type=iframe（小窗模式，用户要求）——构建中止"
+    exit 1
+fi
+echo "✅ 桌面入口为 iframe 小窗模式（不跳浏览器标签页）"
+
 # 三个向导文件必须存在且是合法 JSON（安装/卸载/配置界面的全部内容都在这）
 for w in install uninstall config; do
     if ! grep -qE "^wizard/${w}$" "$TMP/outer.list"; then

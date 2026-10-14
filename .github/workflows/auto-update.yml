@@ -10,8 +10,9 @@ name: Auto-update upstream versions
 #      「是否带预构建产物」过滤，否则手机端版本会抢先入选、再因缺少预构建
 #      产物校验失败而中止整天更新。
 #
-#   2. hermes-agent：跟踪 NousResearch/hermes-agent 最新 release 标签
-#      （日期式标签，如 v2026.9.24）。
+#   2. hermes-agent：跟踪 NousResearch/hermes-agent 最新【正式】release 标签
+#      （语义式 vX.Y.Z；过滤 prerelease/draft、排除 +canary 与历史日期式 tag。
+#       与 detect-upstream.py AGENT_SEMVER_RE 保持一致）。
 #
 # ⚠️ 发布职责归属：本 workflow 【不建 Release、不传资产】。
 #    Release 由 build.yml 独占（一个 Release 只能有一个归属方）。
