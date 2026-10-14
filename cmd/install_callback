@@ -508,27 +508,30 @@ rm -f "\${MARKER}"
         if ! cp -a "\${BUNDLED_AGENT_SRC}" "\${AGENT_ROOT}"; then
             fail "failed to copy bundled source to \${AGENT_ROOT}"
         fi
-        # 确保它是一个可识别的 git 仓库（install.sh 的离线模式会检查 .git）
+        # 更新通道自愈（幂等）：装机后必须能 `hermes update`。
+        # ⛔ 不要锁进 `if [ ! -d .git ]` 分支 —— 那正是老 bug 的形态：
+        #    bundle 自带 .git 时整段跳过，remote 永远补不上。
+        # ⚠️ fnpack 打包会过滤隐藏目录，bundle 的 .git 不进包，
+        #    所以这里「无 .git 也要 git init」。
+        cd "\${AGENT_ROOT}" || fail "cannot cd to \${AGENT_ROOT}"
         if [ ! -d "\${AGENT_ROOT}/.git" ]; then
             echo "Initializing git repo in bundled source ..."
-            cd "\${AGENT_ROOT}" || fail "cannot cd to \${AGENT_ROOT}"
             git init -q || fail "git init failed"
             git config user.email "fnos@local"
             git config user.name "fnOS Installer"
             git add -A
             git commit -q -m "offline bundle" || fail "git commit failed"
         fi
-        # 更新通道自愈（幂等）：FPK 自带 bundle 也可能缺 remote/refspec
-        # （旧包、手动放置的源码），缺了 `hermes update` 就永远用不了。
-        # ⛔ 不要把它并进上面的 `if [ ! -d .git ]` 分支 —— 那正是老 bug 的形态：
-        #    bundle 自带 .git 时整段跳过，remote 永远补不上。
-        cd "\${AGENT_ROOT}" || fail "cannot cd to \${AGENT_ROOT}"
         git remote get-url origin >/dev/null 2>&1 || \
             git remote add origin "https://github.com/NousResearch/hermes-agent.git" 2>/dev/null || true
         git config remote.origin.fetch '+refs/heads/main:refs/remotes/origin/main' 2>/dev/null || true
         git config core.filemode false 2>/dev/null || true
         git branch -m main >/dev/null 2>&1 || true
-        echo "Update channel: origin=\$(git remote get-url origin 2>/dev/null) branch=\$(git branch --show-current 2>/dev/null)"
+        if [ "$(git rev-list --count HEAD 2>/dev/null || echo 0)" = "1" ] \
+           && [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" != "true" ]; then
+            git rev-parse HEAD > .git/shallow 2>/dev/null || true
+        fi
+        echo "Update channel: origin=\$(git remote get-url origin 2>/dev/null) branch=\$(git branch --show-current 2>/dev/null) shallow=\$(git rev-parse --is-shallow-repository 2>/dev/null)"
         export HERMES_OFFLINE_INSTALL=1
         echo "Bundled source ready, HERMES_OFFLINE_INSTALL=1"
     fi

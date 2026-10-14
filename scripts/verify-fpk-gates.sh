@@ -305,25 +305,17 @@ echo "✅ gateway 守护装在系统 cron（不依赖 gateway 自身存活）"
 # 装机后 `hermes update` 必然报
 #   fatal: 'origin' does not appear to be a git repository
 # 而 FPK 升级【不会】覆盖内核（install_callback 见 venv/bin/hermes 存在就跳过），
-# 于是「升了 FPK 但内核纹丝不动、且再也升不上去」。三层都必须有：
-#   构建期 bundle 预置 / 安装回调自愈 / cmd/main 启动自愈。
-if ! tar tzf "$TMP/app.tgz" 2>/dev/null | grep -qE '^app/hermes-agent-src/\.git/$|^app/hermes-agent-src/\.git/config$'; then
-    echo "::error:: bundle 未携带 .git —— 装机后 hermes update 无仓库可用，构建中止"
-    exit 1
-fi
-if ! tar xzf "$TMP/app.tgz" -C "$TMP" app/hermes-agent-src/.git/config 2>/dev/null; then
-    echo "::warning:: 未能解出 bundle 的 .git/config，跳过更新通道内容校验"
-elif ! grep -q 'remote "origin"' "$TMP/app/hermes-agent-src/.git/config" 2>/dev/null; then
-    echo "::error:: bundle 的 .git/config 无 [remote \"origin\"] —— hermes update 会报 'origin' does not appear to be a git repository"
-    exit 1
-fi
-echo "✅ bundle 携带 .git 且已配 origin remote"
-
-# install_callback 的自愈不得再锁进 `if [ ! -d .git ]` 分支 —— 那正是老 bug 的形态。
+# 于是「升了 FPK 但内核纹丝不动、且再也升不上去」。
+# ⚠️ bundle 的 .git 不进包：fnpack 会过滤隐藏目录（松散对象 gc 后 cp stat 失败），
+#    所以更新通道靠 install_callback 装机时补 + cmd/main 启动时自愈（两级幂等）。
 grep -vE '^[[:space:]]*#' "$TMP/cmd/install_callback" > "$TMP/icb.code" 2>/dev/null || true
-if ! grep -q "ensure_agent_update_channel\|remote.origin.fetch" "$TMP/icb.code"; then
-    echo "::error:: install_callback 未自愈 remote/refspec —— bundle 缺 remote 时装机后 hermes update 永久不可用"
+if ! grep -q "remote.origin.fetch" "$TMP/icb.code"; then
+    echo "::error:: install_callback 未预置 remote/refspec —— bundle 缺 remote 时装机后 hermes update 永久不可用"
     exit 1
+fi
+# 自愈不得锁进 `if [ ! -d .git ]` 分支 —— 那正是老 bug 的形态：bundle 带 .git 时整段跳过。
+if grep -A 6 'if \[ ! -d "\\\${AGENT_ROOT}/.git" \]' "$TMP/icb.code" | grep -q 'git init -q'; then
+    echo "::warning:: install_callback 的 git 初始化仍在 [ ! -d .git ] 分支内（旧形态），确认 remote 自愈在分支外即可"
 fi
 if ! grep -q "^ensure_agent_update_channel()" "$TMP/cmd/main"; then
     echo "::error:: cmd/main 缺少 ensure_agent_update_channel() —— 已装旧实例只能靠启动自愈修更新通道"
@@ -334,7 +326,7 @@ if [ "${n:-0}" -lt 1 ]; then
     echo "::error:: cmd/main 定义了 ensure_agent_update_channel() 但未在 start_process 中调用"
     exit 1
 fi
-echo "✅ 内核更新通道三层预置（bundle / install_callback / cmd/main）"
+echo "✅ 内核更新通道两级预置（install_callback 装机补 + cmd/main 启动自愈）"
 
 # 上游改名（hermes-studio -> ekko-studio）后新增了 ekko-studio-mcp / ekko-studio-web
 # 两个 bin 入口。若 fix_bundled_bin_links 又退回写死清单，走 bundled 离线复制路径时
