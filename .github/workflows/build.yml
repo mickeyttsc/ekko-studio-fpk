@@ -280,14 +280,6 @@ jobs:
           fi
           mkdir -p app/hermes-agent-src
           tar -xzf /tmp/ha.tar.gz -C /tmp/ha-extract --strip-components=1
-          # ── 装机瘦身（2026-10-14）：删纯开发内容，缩短 fnOS 解包/授权耗时 ──
-          # 实测 fpk 内层 ~950M/34.4K 文件中 agent-src 占 332M/18.6K；应用中心
-          # 安装按文件做 chmod/chown + 解包，小文件数直接决定升级等待感。
-          # 删除对运行时零引用的目录（源码级核实：仅注释提及，无运行时读取；
-          # desktop 默认不构建）：tests(66M/6081，保留 compat 面审计资料)、
-          # website(28M 文档站源码)、contributors(7.8M 头像物料)。
-          find /tmp/ha-extract/tests -mindepth 1 -maxdepth 1 ! -name compat -exec rm -rf {} + 2>/dev/null || true
-          rm -rf /tmp/ha-extract/website /tmp/ha-extract/contributors
           # 含隐藏文件迁移（.gitignore 必须带上，否则满树 untracked 假脏）
           cp -a /tmp/ha-extract/. app/hermes-agent-src/
           rm -rf /tmp/ha-extract /tmp/ha.tar.gz
