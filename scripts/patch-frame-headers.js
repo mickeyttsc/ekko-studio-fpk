@@ -25,6 +25,10 @@ const fs = require('fs');
 const os = require('os');
 
 const TARGET = process.argv[2];
+// --static-only: 只写「与机器无关」的白名单（域名/localhost），不枚举本机地址。
+// 构建期用它，避免把 CI runner 的地址烤进产物（曾实测把 <BUILD-IP>/fe80::… 写进包，
+// 而运行时旧脚本又不会刷新 → 真实入口 <LAN-IP>/全局 IPv6 反而被 CSP 拦）。
+const STATIC_ONLY = process.argv.includes('--static-only');
 if (!TARGET) { console.error('usage: patch-frame-headers.js <index.js>'); process.exit(2); }
 if (!fs.existsSync(TARGET)) { console.error('not found: ' + TARGET); process.exit(1); }
 
@@ -45,22 +49,29 @@ const origins = new Set([
 ]);
 
 // 本机当前地址（IPv4 + IPv6 字面量；IPv6 必须带方括号）
+// 过滤：virtual 网桥/容器网卡（docker*/br-*/veth*/virbr* 等）与链路本地 fe80:: ——
+// 这些不是用户访问桌面时用的来源，写进白名单只是噪音（本机实测会涌入十几个）。
+const VIRTUAL_IFACE_RE = /^(docker|br-|veth|virbr|tun|tap|wg|kube|flannel|cali|nerdctl|lo$)/;
 function addHost(addr, family) {
   const isV6 = String(family) === 'IPv6' || String(family) === '6';
+  if (isV6 && /^fe80:/i.test(addr)) return;   // 链路本地 IPv6 不可能是父页面来源
   const host = isV6 ? '[' + addr + ']' : addr;
   origins.add('http://' + host + ':*');
   origins.add('https://' + host + ':*');
 }
-try {
-  const ifaces = os.networkInterfaces();
-  for (const name of Object.keys(ifaces)) {
-    for (const ni of ifaces[name] || []) {
-      if (ni.internal) continue;
-      addHost(ni.address, ni.family);
+if (!STATIC_ONLY) {
+  try {
+    const ifaces = os.networkInterfaces();
+    for (const name of Object.keys(ifaces)) {
+      if (VIRTUAL_IFACE_RE.test(name)) continue;
+      for (const ni of ifaces[name] || []) {
+        if (ni.internal) continue;
+        addHost(ni.address, ni.family);
+      }
     }
+  } catch (e) {
+    console.warn('WARN: cannot enumerate interfaces: ' + e.message);
   }
-} catch (e) {
-  console.warn('WARN: cannot enumerate interfaces: ' + e.message);
 }
 
 const LIST = Array.from(origins).join(' ');

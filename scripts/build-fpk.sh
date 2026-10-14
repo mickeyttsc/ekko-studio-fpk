@@ -292,14 +292,17 @@ ensure_node_bundle() {
 ensure_node_bundle
 
 # ── 构建期预打「桌面小窗 iframe 嵌入」补丁 ─────────────────────────────────
-# 根因与补丁内容见 cmd/main 的 patch_webui_frame_headers（运行时自愈那一层）。
-# 这里在打包前直接改 bundled 产物，让 FPK 出厂即带修复：
-#   · 全新安装：install_callback cp -a 复制过来的就是已打补丁的代码
-#   · 运行时 cmd/main 每次启动仍会重打一次（幂等）——覆盖升级覆盖/回退路径
-# 供应链说明：sha256 校验在下载后、打补丁前完成（ensure_node_bundle 内），
-# 校验对象是上游原始产物；打补丁改变的是我们【自己打包】的内容，不破坏校验语义。
+# ⛔ 运行时脚本与构建期脚本必须【同源】：app/bin/ 下的副本由这里从 scripts/ 复制。
+#    2026-10-14 实测事故：scripts/ 升级了动态白名单，app/bin/ 还是旧版没同步，
+#    于是运行时自愈变成 no-op → 白名单里留着 CI runner 的地址（<BUILD-IP>/fe80::…），
+#    而真实入口 <LAN-IP> 与全局 IPv6 反被 CSP 拦（小窗在这些入口下空白）。
+mkdir -p "$ROOT/app/bin"
+cp -f "$ROOT/scripts/patch-frame-headers.js" "$ROOT/app/bin/patch-frame-headers.js"
+chmod 755 "$ROOT/app/bin/patch-frame-headers.js"
+# 构建期用 --static-only：只写与机器无关的白名单（域名/localhost），
+# 本机地址由运行时（cmd/main 启动前）枚举写入 —— 避免把构建机地址烤进产物。
 if [ -f "$ROOT/scripts/patch-frame-headers.js" ] && command -v node >/dev/null 2>&1; then
-    node "$ROOT/scripts/patch-frame-headers.js" \
+    node "$ROOT/scripts/patch-frame-headers.js" --static-only \
         "$ROOT/app/node/lib/node_modules/hermes-web-ui/dist/server/index.js" \
         || { echo "::error:: iframe 嵌入补丁应用失败" >&2; exit 1; }
 else

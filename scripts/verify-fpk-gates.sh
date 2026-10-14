@@ -204,6 +204,27 @@ if ! grep -qE '^bin/patch-frame-headers\.js$' "$TMP/inner.list"; then
     exit 1
 fi
 echo "✅ iframe 补丁脚本随包（bin/patch-frame-headers.js）"
+# ②b 随包的脚本必须是「动态枚举 + 可刷新」那一版 —— 用内容特征断言，fail-closed。
+# ⛔ 事故（2026-10-14）：scripts/ 升级成动态白名单后忘了同步 app/bin/ 的副本，
+#    运行时自愈变成 no-op（日志 "already patched, no change"）→ 白名单里留着
+#    构建机地址 <BUILD-IP>/fe80::…，而真实入口 <LAN-IP> 与全局 IPv6 被 CSP 拦。
+#    只检查「文件存在」抓不到这种漂移，必须断言能力特征。
+tar xzOf "$TMP/app.tgz" bin/patch-frame-headers.js > "$TMP/pfh.js" 2>/dev/null || true
+if ! grep -q 'networkInterfaces' "$TMP/pfh.js"; then
+    echo "::error:: 随包的 bin/patch-frame-headers.js 不是动态版（无 networkInterfaces）—— 运行时自愈不会写入本机地址，192.168.x/全局 IPv6 入口下小窗会空白"
+    exit 1
+fi
+if ! grep -q "frame-ancestors 'self' \[^" "$TMP/pfh.js"; then
+    echo "::error:: 随包脚本缺「刷新已有白名单」正则 —— 无法在升级/迁移后重算地址，构建中止"
+    exit 1
+fi
+echo "✅ 随包补丁脚本为动态版（枚举本机地址 + 可刷新白名单）"
+# ②c 构建期脚本与运行时脚本必须同源（build-fpk.sh 会 cp scripts/ → app/bin/）
+if ! diff -q "scripts/patch-frame-headers.js" "app/bin/patch-frame-headers.js" >/dev/null 2>&1; then
+    echo "::error:: scripts/ 与 app/bin/ 两份补丁脚本不一致 —— build-fpk.sh 的同步步骤失效（曾导致运行时自愈空转）"
+    exit 1
+fi
+echo "✅ 构建期/运行时补丁脚本同源（无副本漂移）"
 # ③ bundled 产物出厂即带补丁（fail-closed：内层 index.js 必须无 DENY/none）
 #    grep -c 读完全部输入不早退，无 SIGPIPE 风险，可安全用于管道。
 XFO_DENY_LEFT="$(tar xzOf "$TMP/app.tgz" node/lib/node_modules/hermes-web-ui/dist/server/index.js 2>/dev/null | grep -c '"X-Frame-Options","DENY"' || true)"
