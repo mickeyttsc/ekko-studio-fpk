@@ -28,6 +28,15 @@ AGENT_ENV=config/bootstrap/hermes-agent-version.env
 log() { echo "[$(date -u '+%H:%M:%S')] $*"; }
 
 # ── 1. 探测上游 ──────────────────────────────────────────────────────────────
+# 先自证标签过滤器行为与声明一致，再探测。过滤器一旦回归（例如 major 放宽回
+# [0-9]+），日期式 tag 会被当成「最新正式版」写进锚点并被 CI 打包 —— 所以这里
+# 失败就【本轮不写锚点】，把回归挡在源头，而不是留下一个装错内核的包。
+if ! python3 scripts/detect-upstream.py selftest >/dev/null 2>&1; then
+    log "ERROR detect-upstream.py selftest 失败（标签过滤器行为与声明不符），本轮拒绝写锚点"
+    python3 scripts/detect-upstream.py selftest 2>&1 | tail -6 | while IFS= read -r l; do log "  $l"; done
+    exit 0
+fi
+
 WEBUI_LATEST="$(python3 scripts/detect-upstream.py webui 2>/dev/null)"
 if [ -z "${WEBUI_LATEST}" ]; then
     log "WARN 未能解析可打包的 hermes-web-ui 版本（上游可能改了资产命名），本轮跳过"

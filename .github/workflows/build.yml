@@ -230,6 +230,15 @@ jobs:
           node-version: '24'
           check-latest: true
 
+      # ── 上游标签过滤器回归自检（fail-closed）──
+      # detect-upstream.py 的注释声明「只跟语义化 tag、拒绝日期式与 canary」，
+      # 本步骤把该声明钉成可执行契约：任一用例不符即中断构建。
+      # 放在取源码包之前 —— 锚点判定与取包用的是同一套口径，先自证再干活。
+      - name: Upstream tag filter selftest
+        run: |
+          set -euo pipefail
+          python3 scripts/detect-upstream.py selftest
+
       # ── Hermes Agent 离线源码包 ──
       # 官方 install.sh 默认 git clone NousResearch/hermes-agent。大量 NAS 无法
       # 稳定连接 GitHub，导致安装后 Agent 启动不了。CI 在 GitHub 内网下载源码并
@@ -245,8 +254,11 @@ jobs:
           set -euo pipefail
           DESIRED_REF="$(grep '^HERMES_AGENT_VERSION=' config/bootstrap/hermes-agent-version.env | cut -d= -f2)"
           [ -z "$DESIRED_REF" ] && DESIRED_REF="main"
-          # 锚点格式硬校验：vX.Y.Z 或 main，别的（+canary/日期式/空垃圾）一律红
-          if ! printf '%s' "$DESIRED_REF" | grep -qE '^(v[0-9]+\.[0-9]+\.[0-9]+|main)$'; then
+          # 锚点格式硬校验：vX.Y.Z（major 最多 3 位）或 main，别的（+canary/日期式/空垃圾）一律红
+          # ⚠️ major 不能写 [0-9]+ —— 那会放行上游的日期式 tag（v2026.9.24，4 位年份），
+          #    与本行注释的声明矛盾。口径与 scripts/detect-upstream.py 的 AGENT_SEMVER_RE
+          #    （^v\d{1,3}\.[0-9]+\.[0-9]+$）保持一致，两侧行为由 selftest 钉住。
+          if ! printf '%s' "$DESIRED_REF" | grep -qE '^(v[0-9]{1,3}\.[0-9]+\.[0-9]+|main)$'; then
             echo "::error:: HERMES_AGENT_VERSION 锚点非法: '$DESIRED_REF'（允许 vX.Y.Z 或 main；拒绝 +canary 预发布与日期式 tag）"
             exit 1
           fi
