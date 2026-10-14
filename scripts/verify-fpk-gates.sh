@@ -238,6 +238,18 @@ if [ "${m:-0}" -lt 1 ]; then
 fi
 echo "✅ 启动前以端口实际占用者为准释放端口（属于本应用才杀，绝不误杀他应用）"
 
+# ── 监听地址双栈门禁（2026-10-14 IPv6 小窗打不开事故）────────────────────────
+# 事故模型：上游 listen 主机取 env BIND_HOST，默认 "0.0.0.0" = 纯 IPv4。
+# 用户家宽 IPv4 是 CGNAT、外网/手机全走 IPv6；fnOS 桌面 iframe 的 src 用
+# ${host}:<port> 拼（host = 访问桌面用的域名，AAAA-only），而 nginx 5666 双栈、
+# 同机其它 fpk 应用端口也都是 `*`（双栈）——只有本应用纯 IPv4 → 小窗
+# net::ERR_CONNECTION_REFUSED。缺这一行 = 只有 IPv6 用户打不开小窗。
+if ! grep -q 'BIND_HOST' "$TMP/main.code"; then
+    echo "::error:: cmd/main 未注入 BIND_HOST —— 纯 IPv4 监听会让 IPv6 访问（含 AAAA-only 域名）连接被拒，桌面小窗打不开"
+    exit 1
+fi
+echo "✅ cmd/main 注入 BIND_HOST（IPv4+IPv6 双栈监听，与其它 fpk 应用一致）"
+
 # 三个向导文件必须存在且是合法 JSON（安装/卸载/配置界面的全部内容都在这）
 for w in install uninstall config; do
     if ! grep -qE "^wizard/${w}$" "$TMP/outer.list"; then

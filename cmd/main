@@ -512,6 +512,24 @@ export HOME="${WEB_UI_HOME}"
 # 可用环境变量覆盖以收紧：CORS_ORIGINS='https://studio.example-relay.com:1996 http://<LAN-IP>:8648'
 export CORS_ORIGINS="${CORS_ORIGINS:-*}"
 
+# ── 监听地址：IPv4 + IPv6 双栈（BIND_HOST）──────────────────────────────────
+# 上游 listen 主机取 process.env.BIND_HOST，默认 "0.0.0.0" = 纯 IPv4。
+# 纯 IPv4 下任何走 IPv6 的入口都是 ERR_CONNECTION_REFUSED：
+#   · fnOS 桌面 iframe 的 src 用 ${host}:<port> 拼，host 就是用户访问桌面用的域名/IP；
+#     用户家宽 IPv4 是 CGNAT，外网/手机流量全靠 IPv6 → 桌面能开（nginx 5666 双栈），
+#     但应用端口连不上 → 小窗打不开（2026-10-14 实测：http://fn.example.com:8648/ 被拒）。
+#   · 同机其它 fpk 应用端口都是 `*`（双栈），所以「别的小窗正常、只有本应用不行」。
+# 绑 "::" 在 Linux 默认 net.ipv6.bindv6only=0 下同时接受 IPv4（v4-mapped）与 IPv6，
+# 语义与其它应用的 `*` 一致。IPv6 不可用的机器回退 0.0.0.0，避免绑不上起不来。
+if [ -z "${BIND_HOST}" ]; then
+    if [ -d /proc/sys/net/ipv6 ] && [ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo 1)" = "0" ]; then
+        BIND_HOST="::"
+    else
+        BIND_HOST="0.0.0.0"
+    fi
+fi
+export BIND_HOST
+
 # ---------------------------------------------------------------------------
 # Hermes Agent 后台安装：非阻塞触发（v0.6.38-2 核心修复）
 # ---------------------------------------------------------------------------
