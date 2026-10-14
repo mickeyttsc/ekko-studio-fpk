@@ -118,8 +118,12 @@ ensure_hermes_agent_src() {
         return 0
     fi
 
-    # 移动到目标目录
-    mv "$ROOT/.ha-extract"/* "$src_dir/" 2>/dev/null || true
+    # 移动到目标目录（含隐藏文件：.gitignore 等必须一起迁移，
+    # 否则已装实例满树 __pycache__/egg-info 变成 untracked，
+    # 每次 hermes update 都要 stash 上万条假改动）
+    if [ -d "$ROOT/.ha-extract" ]; then
+        cp -a "$ROOT/.ha-extract/." "$src_dir/"
+    fi
     rm -rf "$ROOT/.ha-extract" "$tmp_tar"
 
     if [ ! -f "$src_dir/pyproject.toml" ]; then
@@ -137,6 +141,11 @@ ensure_hermes_agent_src() {
         git add -A 2>/dev/null || true
         git commit -q -m "offline bundle" 2>/dev/null || true
     )
+
+    # 预置内核更新通道：否则装机后 `hermes update` 必然报
+    # "fatal: 'origin' does not appear to be a git repository"，
+    # FPK 升级也不会覆盖内核（install_callback 见 venv/bin/hermes 就跳过）。
+    bash "$ROOT/scripts/harden-agent-bundle.sh" "$src_dir" || true
 
     touch "$marker"
     echo "$agent_ver" > "$ref_marker"

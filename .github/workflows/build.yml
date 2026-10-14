@@ -278,7 +278,9 @@ jobs:
           [ -s /tmp/ha.tar.gz ] || { echo "::error:: Hermes Agent 源码包下载失败（GitHub 网络问题），中止构建"; exit 1; }
           mkdir -p app/hermes-agent-src
           tar -xzf /tmp/ha.tar.gz -C /tmp/ha-extract --strip-components=1
-          mv /tmp/ha-extract/* app/hermes-agent-src/
+          # 含隐藏文件迁移（.gitignore 必须带上，否则满树 untracked 假脏）
+          cp -a /tmp/ha-extract/. app/hermes-agent-src/
+          rm -rf /tmp/ha-extract /tmp/ha.tar.gz
           [ -f "app/hermes-agent-src/pyproject.toml" ] || { echo "::error:: 解压后未找到 pyproject.toml，源码包异常"; exit 1; }
           (
             cd app/hermes-agent-src
@@ -288,6 +290,8 @@ jobs:
             git add -A
             git commit -q -m "offline bundle"
           )
+          # 预置内核更新通道（装机后 `hermes update` 才能用）
+          bash scripts/harden-agent-bundle.sh app/hermes-agent-src || true
           echo "$DESIRED_REF" > "$REF_MARKER"
           touch app/hermes-agent-src/.offline-bundle
           echo "离线源码包准备完成 (ref=$DESIRED_REF)"

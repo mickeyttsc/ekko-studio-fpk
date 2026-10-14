@@ -300,6 +300,42 @@ if ! grep -qE 'crontab -|/etc/cron\.d/' "$TMP/cmd/main"; then
 fi
 echo "✅ gateway 守护装在系统 cron（不依赖 gateway 自身存活）"
 
+# ── 内核更新通道必须预置好（2026-10-14 加）──────────────────────────
+# 真实故障：bundle 的 .git 由 git init 生成、只带 core+user 段，没有 remote。
+# 装机后 `hermes update` 必然报
+#   fatal: 'origin' does not appear to be a git repository
+# 而 FPK 升级【不会】覆盖内核（install_callback 见 venv/bin/hermes 存在就跳过），
+# 于是「升了 FPK 但内核纹丝不动、且再也升不上去」。三层都必须有：
+#   构建期 bundle 预置 / 安装回调自愈 / cmd/main 启动自愈。
+if ! tar tzf "$TMP/app.tgz" 2>/dev/null | grep -qE '^app/hermes-agent-src/\.git/$|^app/hermes-agent-src/\.git/config$'; then
+    echo "::error:: bundle 未携带 .git —— 装机后 hermes update 无仓库可用，构建中止"
+    exit 1
+fi
+if ! tar xzf "$TMP/app.tgz" -C "$TMP" app/hermes-agent-src/.git/config 2>/dev/null; then
+    echo "::warning:: 未能解出 bundle 的 .git/config，跳过更新通道内容校验"
+elif ! grep -q 'remote "origin"' "$TMP/app/hermes-agent-src/.git/config" 2>/dev/null; then
+    echo "::error:: bundle 的 .git/config 无 [remote \"origin\"] —— hermes update 会报 'origin' does not appear to be a git repository"
+    exit 1
+fi
+echo "✅ bundle 携带 .git 且已配 origin remote"
+
+# install_callback 的自愈不得再锁进 `if [ ! -d .git ]` 分支 —— 那正是老 bug 的形态。
+grep -vE '^[[:space:]]*#' "$TMP/cmd/install_callback" > "$TMP/icb.code" 2>/dev/null || true
+if ! grep -q "ensure_agent_update_channel\|remote.origin.fetch" "$TMP/icb.code"; then
+    echo "::error:: install_callback 未自愈 remote/refspec —— bundle 缺 remote 时装机后 hermes update 永久不可用"
+    exit 1
+fi
+if ! grep -q "^ensure_agent_update_channel()" "$TMP/cmd/main"; then
+    echo "::error:: cmd/main 缺少 ensure_agent_update_channel() —— 已装旧实例只能靠启动自愈修更新通道"
+    exit 1
+fi
+n="$(grep -c '^\s*ensure_agent_update_channel$' "$TMP/cmd/main" || true)"
+if [ "${n:-0}" -lt 1 ]; then
+    echo "::error:: cmd/main 定义了 ensure_agent_update_channel() 但未在 start_process 中调用"
+    exit 1
+fi
+echo "✅ 内核更新通道三层预置（bundle / install_callback / cmd/main）"
+
 # 上游改名（hermes-studio -> ekko-studio）后新增了 ekko-studio-mcp / ekko-studio-web
 # 两个 bin 入口。若 fix_bundled_bin_links 又退回写死清单，走 bundled 离线复制路径时
 # 这些入口会缺失，MCP 配置里的命令就找不到 —— 必须从 package.json 动态读取。

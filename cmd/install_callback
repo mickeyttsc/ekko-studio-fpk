@@ -517,8 +517,18 @@ rm -f "\${MARKER}"
             git config user.name "fnOS Installer"
             git add -A
             git commit -q -m "offline bundle" || fail "git commit failed"
-            git remote add origin "https://github.com/NousResearch/hermes-agent.git" 2>/dev/null || true
         fi
+        # 更新通道自愈（幂等）：FPK 自带 bundle 也可能缺 remote/refspec
+        # （旧包、手动放置的源码），缺了 `hermes update` 就永远用不了。
+        # ⛔ 不要把它并进上面的 `if [ ! -d .git ]` 分支 —— 那正是老 bug 的形态：
+        #    bundle 自带 .git 时整段跳过，remote 永远补不上。
+        cd "\${AGENT_ROOT}" || fail "cannot cd to \${AGENT_ROOT}"
+        git remote get-url origin >/dev/null 2>&1 || \
+            git remote add origin "https://github.com/NousResearch/hermes-agent.git" 2>/dev/null || true
+        git config remote.origin.fetch '+refs/heads/main:refs/remotes/origin/main' 2>/dev/null || true
+        git config core.filemode false 2>/dev/null || true
+        git branch -m main >/dev/null 2>&1 || true
+        echo "Update channel: origin=\$(git remote get-url origin 2>/dev/null) branch=\$(git branch --show-current 2>/dev/null)"
         export HERMES_OFFLINE_INSTALL=1
         echo "Bundled source ready, HERMES_OFFLINE_INSTALL=1"
     fi

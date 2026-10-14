@@ -385,6 +385,33 @@ WD_EOF
     install_watchdog_cron "# hermes-studio-fpk-ci-watchdog" "17 * * * * /bin/bash ${wd} >/dev/null 2>&1" "/etc/cron.d/hermes-studio-fpk-ci" "${wd}"
 }
 
+# 内核更新通道自愈（幂等，每次 start 都跑）：
+# FPK 升级【不会】覆盖已装内核 —— install_callback 见 venv/bin/hermes 存在就 return，
+# 所以老装机即使装了新 FPK，内核仍是旧 bundle 形态（master 分支、无 remote）。
+# 缺 remote → `hermes update` 报 "fatal: 'origin' does not appear to be a git repository"；
+# 停在 master → update 目标 main，触发 parked-branch 守卫直接跳过；
+# filemode 未关 → fnOS chmod -R 755 把全树打成 dirty，每次 update 要 stash 上万条假改动。
+ensure_agent_update_channel() {
+    local src="${HERMES_AGENT_ROOT}"
+    [ -d "${src}/.git" ] || return 0
+    git -C "${src}" remote get-url origin >/dev/null 2>&1 || \
+        git -C "${src}" remote add origin "https://github.com/NousResearch/hermes-agent.git" 2>/dev/null || true
+    git -C "${src}" config remote.origin.fetch '+refs/heads/main:refs/remotes/origin/main' 2>/dev/null || true
+    git -C "${src}" config core.filemode false 2>/dev/null || true
+    local cur
+    cur="$(git -C "${src}" symbolic-ref --short HEAD 2>/dev/null || true)"
+    if [ "${cur}" = "master" ]; then
+        git -C "${src}" branch -m main >/dev/null 2>&1 || true
+    fi
+    # 单提交 bundle 标 shallow：与官方 depth-1 clone 同形态。
+    # 实测 plain fetch 孤儿要 1GB+/88s，shallow 增量仅 84MB/9s。
+    if [ "$(git -C "${src}" rev-parse --is-shallow-repository 2>/dev/null)" != "true" ] \
+       && [ "$(git -C "${src}" rev-list --count HEAD 2>/dev/null || echo 0)" = "1" ]; then
+        git -C "${src}" rev-parse HEAD > "${src}/.git/shallow" 2>/dev/null || true
+    fi
+    log_msg "Agent update channel ready: origin=$(git -C "${src}" remote get-url origin 2>/dev/null) branch=$(git -C "${src}" symbolic-ref --short HEAD 2>/dev/null) shallow=$(git -C "${src}" rev-parse --is-shallow-repository 2>/dev/null)"
+}
+
 # 清理本应用相关子进程（web-ui / gateway / bridge / mcp / watchdog / monitor / dashboard）。
 # 旧版本 install_init/cmd/main 只清理 web-ui 主进程，导致 gateway/bridge 残留，
 # 新实例启动时 agent bridge 因 IPC socket 冲突而退出（code=1）。
@@ -821,6 +848,7 @@ start_process() {
     ensure_gateway_autostart_config
     ensure_gateway_watchdog
     ensure_fpk_ci_watchdog
+    ensure_agent_update_channel
 
     log_msg "starting hermes-web-ui on port ${PORT} ..."
     # 官方 CLI 自带 daemon，--no-open 避免 NAS 上尝试打开浏览器。
