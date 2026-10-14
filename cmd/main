@@ -505,19 +505,19 @@ export HOME="${WEB_UI_HOME}"
 # CORS / Socket.IO Origin 白名单。
 # 上游默认按「Origin 必须与 Host 严格相等」校验 WebSocket 升级请求（server/index.js 的
 # $Ne/c5n：new URL(origin).host === host）。任何把端口剥掉或改写 Host 的入口都会导致不相等：
-#   · Lucky 反代（studio.example-relay.com:1996）→ 后端 Host 可能不含端口
-#   · fnOS FN Connect 远程中继 → origin=office.app.example-cloud.net:<随机端口>，host=内网地址
+#   · 反代（如 https://your-domain.example:1996）→ 后端 Host 可能不含端口
+#   · fnOS FN Connect 远程中继 → origin=<中继域名>:<随机端口>，host=内网地址
 # 命中即被拒：[Socket.IO] rejected upgrade origin → WebSocket 连不上（页面能开、对话不流式）。
 # 远程中继端口每次随机，无法用固定清单覆盖，故用 *（与上游 enableClientMode() 同款做法）。
-# 可用环境变量覆盖以收紧：CORS_ORIGINS='https://studio.example-relay.com:1996 http://<LAN-IP>:8648'
+# 可用环境变量覆盖以收紧：CORS_ORIGINS='https://your-domain.example:1996 http://<LAN-IP>:8648'
 export CORS_ORIGINS="${CORS_ORIGINS:-*}"
 
 # ── 监听地址：IPv4 + IPv6 双栈（BIND_HOST）──────────────────────────────────
 # 上游 listen 主机取 process.env.BIND_HOST，默认 "0.0.0.0" = 纯 IPv4。
 # 纯 IPv4 下任何走 IPv6 的入口都是 ERR_CONNECTION_REFUSED：
 #   · fnOS 桌面 iframe 的 src 用 ${host}:<port> 拼，host 就是用户访问桌面用的域名/IP；
-#     用户家宽 IPv4 是 CGNAT，外网/手机流量全靠 IPv6 → 桌面能开（nginx 5666 双栈），
-#     但应用端口连不上 → 小窗打不开（2026-10-14 实测：http://fn.example.com:8648/ 被拒）。
+#     家宽 IPv4 常见是 CGNAT，外网/手机流量全靠 IPv6 → 桌面能开（nginx 通常双栈），
+#     但应用端口连不上 → 小窗打不开（实测：http://<域名>:<port>/ 被拒 ERR_CONNECTION_REFUSED）。
 #   · 同机其它 fpk 应用端口都是 `*`（双栈），所以「别的小窗正常、只有本应用不行」。
 # 绑 "::" 在 Linux 默认 net.ipv6.bindv6only=0 下同时接受 IPv4（v4-mapped）与 IPv6，
 # 语义与其它应用的 `*` 一致。IPv6 不可用的机器回退 0.0.0.0，避免绑不上起不来。
@@ -529,6 +529,16 @@ if [ -z "${BIND_HOST}" ]; then
     fi
 fi
 export BIND_HOST
+
+# ── 小窗 iframe 白名单的「本地额外来源」（不进仓库、不进产物）─────────────────
+# 内置静态白名单只含与机器无关的值：'self' / localhost / 127.0.0.1 / [::1]；
+# 本机地址由运行时枚举写入（任何机器装上即得自己的地址，零配置）；
+# 使用者自己的反代/直连域名等写在下面这个文件里（每行一个来源，# 注释）：
+#     ${HERMES_HOME}/frame-ancestors.extra
+#     例：https://*.your-domain.example:*
+# 这样设计的原因：① 不把打包者的内网 IP / 域名写进公开产物（隐私）；
+#                ② 别人的机器零配置即可用（地址靠枚举），域名各补各的。
+export FRAME_ANCESTORS_FILE="${FRAME_ANCESTORS_FILE:-${HERMES_HOME}/frame-ancestors.extra}"
 
 # ---------------------------------------------------------------------------
 # Hermes Agent 后台安装：非阻塞触发（v0.6.38-2 核心修复）

@@ -294,8 +294,8 @@ ensure_node_bundle
 # ── 构建期预打「桌面小窗 iframe 嵌入」补丁 ─────────────────────────────────
 # ⛔ 运行时脚本与构建期脚本必须【同源】：app/bin/ 下的副本由这里从 scripts/ 复制。
 #    2026-10-14 实测事故：scripts/ 升级了动态白名单，app/bin/ 还是旧版没同步，
-#    于是运行时自愈变成 no-op → 白名单里留着 CI runner 的地址（<BUILD-IP>/fe80::…），
-#    而真实入口 <LAN-IP> 与全局 IPv6 反被 CSP 拦（小窗在这些入口下空白）。
+#    于是运行时自愈变成 no-op → 白名单里留着构建机的地址（<构建机IP>/fe80::…），
+#    而部署者真实入口地址反被 CSP 拦（小窗在这些入口下空白）。
 mkdir -p "$ROOT/app/bin"
 cp -f "$ROOT/scripts/patch-frame-headers.js" "$ROOT/app/bin/patch-frame-headers.js"
 chmod 755 "$ROOT/app/bin/patch-frame-headers.js"

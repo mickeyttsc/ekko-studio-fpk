@@ -207,7 +207,7 @@ echo "✅ iframe 补丁脚本随包（bin/patch-frame-headers.js）"
 # ②b 随包的脚本必须是「动态枚举 + 可刷新」那一版 —— 用内容特征断言，fail-closed。
 # ⛔ 事故（2026-10-14）：scripts/ 升级成动态白名单后忘了同步 app/bin/ 的副本，
 #    运行时自愈变成 no-op（日志 "already patched, no change"）→ 白名单里留着
-#    构建机地址 <BUILD-IP>/fe80::…，而真实入口 <LAN-IP> 与全局 IPv6 被 CSP 拦。
+#    构建机地址 <构建机IP>/fe80::…，而部署者真实入口地址被 CSP 拦。
 #    只检查「文件存在」抓不到这种漂移，必须断言能力特征。
 tar xzOf "$TMP/app.tgz" bin/patch-frame-headers.js > "$TMP/pfh.js" 2>/dev/null || true
 if ! grep -q 'networkInterfaces' "$TMP/pfh.js"; then
@@ -235,6 +235,20 @@ if [ "${XFO_DENY_LEFT:-0}" != "0" ] || [ "${FA_NONE_LEFT:-0}" != "0" ] || [ "${A
     exit 1
 fi
 echo "✅ bundled 产物出厂带 iframe 补丁（XFO=ALLOWALL, frame-ancestors 白名单）"
+# ④ 产物零隐私 / 零机器绑定（fail-closed）：
+# 白名单必须只有与机器无关的静态项 + 运行时枚举。若出现私有网段 IP、IPv6 字面量
+# （::1 除外）或域名，说明打包者的内网地址/域名被烤进了公开产物 ——
+# 既泄露隐私，也让别人的机器用不了（各家入口地址/域名都不同）。
+WL="$(tar xzOf "$TMP/app.tgz" node/lib/node_modules/hermes-web-ui/dist/server/index.js 2>/dev/null \
+      | grep -oE "frame-ancestors 'self' [^\"]*" | head -1)"
+PRIV_IP="$(printf '%s\n' "$WL" | grep -oE 'https?://(10\.[0-9.]+|192\.168\.[0-9.]+|172\.(1[6-9]|2[0-9]|3[01])\.[0-9.]+)' | sort -u | tr '\n' ' ' || true)"
+V6_LIT="$(printf '%s\n' "$WL" | grep -oE 'https?://\[[0-9a-fA-F:]+\]' | grep -v '\[::1\]' | sort -u | tr '\n' ' ' || true)"
+DOMAIN="$(printf '%s\n' "$WL" | grep -oE 'https?://[A-Za-z0-9][A-Za-z0-9._-]*\.[A-Za-z]{2,}' | grep -v 'localhost' | sort -u | tr '\n' ' ' || true)"
+if [ -n "${PRIV_IP}${V6_LIT}${DOMAIN}" ]; then
+    echo "::error:: 产物白名单含机器/个人绑定信息（私有IP=[${PRIV_IP}] IPv6=[${V6_LIT}] 域名=[${DOMAIN}]）—— 泄露打包者隐私且他人机器不可用，构建中止"
+    exit 1
+fi
+echo "✅ 产物白名单零隐私（仅 'self'/localhost/127.0.0.1/[::1]；本机地址与域名由部署方本地补）"
 
 # ── 启动健康判定 fail-closed + 端口释放门禁（2026-10-14 假启动事故固化）──
 # 事故模型：上一版实例仍占 8648 → 新实例 bootstrap 打「listening on 0.0.0.0:PORT」
