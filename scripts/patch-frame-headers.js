@@ -104,8 +104,19 @@ if (!STATIC_ONLY) {
   }
 }
 
+// ── 生成下发值 ──────────────────────────────────────────────────────────────
+// 默认【不限制父页面】(`frame-ancestors *`)：
+//   本 fpk 是公开分发的，安装者的域名/入口形态不可枚举（自有域名、反代、IPv6、
+//   fnOS Connect 子域、局域网 IP……）。白名单式限制必然对某类用户失效 ——
+//   实测形态：fnOS 服务器自己的 CSP 把「未列入白名单的父页面」拦成
+//   ERR_BLOCKED_BY_RESPONSE / 「拒绝连接」，表现为桌面小窗打不开而普通网页访问正常。
+//   上游本身也不做该限制（XFO: DENY 是上游遗留），同类应用（CLIProxyAPI 等）
+//   干脆不下发 XFO/CSP。故默认对齐为「不限」。
+// 需要收紧的部署（如暴露公网且在意点击劫持）：设 FRAME_ANCESTORS_STRICT=1，
+//   则改用下面的白名单（本机地址运行时枚举 + 环境变量/本地文件补充）。
+const STRICT = process.env.FRAME_ANCESTORS_STRICT === '1';
 const LIST = Array.from(origins).join(' ');
-const NEW_DIRECTIVE = 'frame-ancestors ' + LIST;
+const NEW_DIRECTIVE = STRICT ? ('frame-ancestors ' + LIST) : 'frame-ancestors *';
 
 let n = 0;
 
@@ -115,8 +126,9 @@ s = s.replace(/"X-Frame-Options","DENY"/g, () => { n++; return '"X-Frame-Options
 // 2) 首次：frame-ancestors 'none' -> 白名单
 s = s.replace(/frame-ancestors 'none'/g, () => { n++; return NEW_DIRECTIVE; });
 
-// 3) 刷新：已打过的那条（"frame-ancestors 'self' <origins>"）重算本机地址/额外来源
-s = s.replace(/frame-ancestors 'self' [^";]*/g, () => { n++; return NEW_DIRECTIVE; });
+// 3) 刷新：已打过的那条（白名单形态 "frame-ancestors 'self' ..." 或 "frame-ancestors *"）
+//    重算（含 mode 切换：默认<->严格）
+s = s.replace(/frame-ancestors 'self' [^";]*|frame-ancestors \*/g, () => { n++; return NEW_DIRECTIVE; });
 
 if (n === 0) {
   console.log('already patched, no change');
@@ -134,4 +146,5 @@ console.log('verify XFO DENY remaining: ' + ok(!after.includes('"X-Frame-Options
 console.log('verify frame-ancestors none remaining: ' + ok(!/frame-ancestors 'none'/.test(after)));
 console.log('verify ALLOWALL present: ' + ok(after.includes('"X-Frame-Options","ALLOWALL"')));
 const m = after.match(/frame-ancestors 'self' [^";]*/);
-console.log('whitelist entries: ' + (m ? m[0].split(/\s+/).length - 1 : 0));
+const wildcard = /frame-ancestors \*/.test(after);
+console.log('mode: ' + (wildcard ? 'permissive (frame-ancestors *)' : ('strict (whitelist, ' + (m ? m[0].split(/\s+/).length - 1 : 0) + ' entries)')));

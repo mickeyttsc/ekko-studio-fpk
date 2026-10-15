@@ -326,39 +326,42 @@ if ! grep -qE '^bin/patch-frame-headers\.js$' "$TMP/inner.list"; then
     exit 1
 fi
 echo "✅ iframe 补丁脚本随包（bin/patch-frame-headers.js）"
-# ②a 补丁脚本必须内置 fnOS 官方远程域（fnos.net / 5ddd.com / trzznas.com）——
-#     远程模式下桌面以这些域为父页面，缺了就被自家 CSP 拦成「拒绝连接」
-#     （2026-10-15 用户实测：远程小窗打不开的真根因）。
-for need in 'fnos.net' '*.fnos.net' '5ddd.com' 'trzznas.com'; do
+# ②a 补丁脚本必须【默认不限制父页面】（frame-ancestors *）并提供可选严格模式：
+#     本 fpk 公开分发，安装者的域名/入口不可枚举 —— 白名单式限制必然对某类用户失效，
+#     实测形态是桌面小窗被自家 CSP 拦成「拒绝连接」/ERR_BLOCKED_BY_RESPONSE。
+#     上游遗留 XFO: DENY 要改成 ALLOWALL；需要收紧的部署用 FRAME_ANCESTORS_STRICT=1。
+for need in "'frame-ancestors *'" 'FRAME_ANCESTORS_STRICT'; do
     if ! grep -qF -- "$need" "$TMP/bin/patch-frame-headers.js" 2>/dev/null; then
         tar xzf "$TMP/app.tgz" -C "$TMP" bin/patch-frame-headers.js 2>/dev/null || true
         if ! grep -qF -- "$need" "$TMP/bin/patch-frame-headers.js" 2>/dev/null; then
-            echo "::error:: patch-frame-headers.js 缺 fnOS 官方远程域 '$need' —— 远程访问小窗会被自家 CSP 拦成「拒绝连接」"
+            echo "::error:: patch-frame-headers.js 缺要素 '$need' —— 默认应不限制父页面（否则特定用户的桌面小窗会被自家 CSP 拦）"
             exit 1
         fi
     fi
 done
-echo "✅ 补丁脚本内置 fnOS 官方远程域（fnos.net/5ddd.com/trzznas.com）"
-# ②a2 出厂产物（bundled dist）也必须已经带上这些域：构建期用 --static-only 打的是
-#      静态表，官方域属于静态表 —— 产物里没有就说明构建期补丁没跑或被打回。
+echo "✅ 补丁脚本默认不限制父页面（frame-ancestors *），并保留 FRAME_ANCESTORS_STRICT 收紧开关"
+# ②a2 出厂产物（bundled dist）必须已经是不限制态：不得残留 frame-ancestors 'none'，
+#      且必须出现 frame-ancestors *。做不到 = 构建期补丁没跑/被打回，远端用户装完即报错。
 BUNDLED=""
-for cand in "node/lib/node_modules/hermes-web-ui/dist/server/index.js" \
-            "app/node/lib/node_modules/hermes-web-ui/dist/server/index.js"; do
-    if grep -qxF "$cand" "$TMP/inner.list" 2>/dev/null; then BUNDLED="$cand"; break; fi
-done
-if [ -z "$BUNDLED" ]; then
+if grep -qxF "node/lib/node_modules/hermes-web-ui/dist/server/index.js" "$TMP/inner.list" 2>/dev/null; then
+    BUNDLED="node/lib/node_modules/hermes-web-ui/dist/server/index.js"
+else
     BUNDLED="$(grep -E 'hermes-web-ui/dist/server/index\.js$' "$TMP/inner.list" | head -1 || true)"
 fi
 if [ -z "$BUNDLED" ]; then
-    echo "::error:: 内层找不到 hermes-web-ui 的 dist/server/index.js —— 无法校验出厂 iframe 白名单"
+    echo "::error:: 内层找不到 hermes-web-ui 的 dist/server/index.js —— 无法校验出厂 iframe 头"
     exit 1
 fi
 tar xzf "$TMP/app.tgz" -C "$TMP" "$BUNDLED" 2>/dev/null || true
-if ! grep -q 'https://\*\.fnos\.net:\*' "$TMP/$BUNDLED" 2>/dev/null; then
-    echo "::error:: 出厂 dist 未含 https://*.fnos.net:*（构建期 --static-only 补丁没打上/被回退）—— 远程小窗会「拒绝连接」"
+if grep -q "frame-ancestors 'none'" "$TMP/$BUNDLED" 2>/dev/null; then
+    echo "::error:: 出厂 dist 仍含 frame-ancestors 'none'（限制态）—— 远端用户桌面小窗会被拦，构建中止"
     exit 1
 fi
-echo "✅ 出厂 dist 已含 fnOS 官方远程域（远程小窗不再被自家 CSP 拦）"
+if ! grep -q 'frame-ancestors \*' "$TMP/$BUNDLED" 2>/dev/null; then
+    echo "::error:: 出厂 dist 未出现 frame-ancestors *（默认不限制未生效）—— 构建中止"
+    exit 1
+fi
+echo "✅ 出厂 dist 为不限制态（frame-ancestors *，无 'none' 残留）"
 # ②b 随包的脚本必须是「动态枚举 + 可刷新」那一版 —— 用内容特征断言，fail-closed。
 # ⛔ 事故（2026-10-14）：scripts/ 升级成动态白名单后忘了同步 app/bin/ 的副本，
 #    运行时自愈变成 no-op（日志 "already patched, no change"）→ 白名单里留着
@@ -394,10 +397,8 @@ echo "✅ bundled 产物出厂带 iframe 补丁（XFO=ALLOWALL, frame-ancestors 
 # 白名单必须只有与机器无关的静态项 + 运行时枚举。若出现私有网段 IP、IPv6 字面量
 # （::1 除外）或域名，说明打包者的内网地址/域名被烤进了公开产物 ——
 # 既泄露隐私，也让别人的机器用不了（各家入口地址/域名都不同）。
-# ⚠️ 例外：fnOS 官方远程域（fnos.net / 5ddd.com / trzznas.com）是【产品常量】——
-#    不是打包者私有物、对所有使用者都成立（Connect/手机 App 的桌面地址就在这些域下），
-#    必须有，否则远程小窗被自家 CSP 拦成「拒绝连接」（2026-10-15 真根因）。
-#    这里用产品常量白名单放行，其余任何域名仍然判红。
+# 默认不限制（frame-ancestors *）时本项自然通过；若有人改回白名单形态，
+# 下面仍会拦住打包者私有 IP/域名（产品常量域 fnos.net/5ddd.com/trzznas.com 放行）。
 WL="$(tar xzOf "$TMP/app.tgz" node/lib/node_modules/hermes-web-ui/dist/server/index.js 2>/dev/null \
       | grep -oE "frame-ancestors 'self' [^\"]*" | head -1)"
 PRIV_IP="$(printf '%s\n' "$WL" | grep -oE 'https?://(10\.[0-9.]+|192\.168\.[0-9.]+|172\.(1[6-9]|2[0-9]|3[01])\.[0-9.]+)' | sort -u | tr '\n' ' ' || true)"
