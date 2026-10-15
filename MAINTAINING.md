@@ -158,8 +158,15 @@ fnOS 没有本地 fpk 升级命令（`appcenter-cli install-fpk` 对已装应用
 CLI 无 upgrade 子命令）。可行路径 = **应用中心 UI 手动安装新 fpk**，
 或在应用中心里选择升级。装完跑一次验收清单。
 
-内核（Hermes Agent）**不会**随 fpk 升级：`install_callback` 检测到
-`venv/bin/hermes` 存在即跳过。内核升级走 `hermes update`。
+内核（Hermes Agent）**会**随 fpk 升级：`install_callback`/`upgrade_callback` 都过
+`config/bootstrap/ensure-kernel.sh` 版本闸门，包内内核较新时原地对齐（备份 + 复用
+venv + 失败回滚），见坑表 #36。用户自己 `hermes update` 到更新版本时闸门判 skip，
+绝不降级。
+
+**装完必须确认界面版本**：Studio 版本栏读的是 `hermes_cli.__version__`，它只认内核
+树里的 `install-stamp.json`（不回退 git）——stamp 缺失/损坏时界面显示 `0.0.0`。
+故装后由 `hermes-agent-postinstall.sh --expect-version <本包锚点>` 实测断言
+「界面会显示的值 == 包内锚点」，不符即回滚（见坑表 #37）。
 
 ---
 
@@ -203,8 +210,10 @@ CLI 无 upgrade 子命令）。可行路径 = **应用中心 UI 手动安装新 
 | 32 | **向导文案与实现不符** —— 上游写「首次安装会自动下载 Node.js 运行时并全局安装 hermes-web-ui，请耐心等待」，实际是内置 bundled 运行时离线复制，几秒完成 | 文案按真实行为改写（内置依赖、安装很快、首启后台装内核） |
 | 33 | **配置向导缺失** —— 上游没有 `wizard/config`，装完无法在应用设置里调整端口/微信策略 | 新增 `wizard/config` + `config_callback` 真正落地变更 |
 | 34 | **上游在 `install_callback` 里注入 `trim-cli` 技能** —— `rm -rf` 用户技能目录后覆盖，会打回旧版 | 不内置任何技能；CI 门禁查内外两层 |
-| 36 | **升级 fpk 不更新内核（用户实测暴露）** —— `install_callback` 见 `venv/bin/hermes` 存在就 `return 0`，`upgrade_callback` 又只比 hermes-web-ui 版本；两版 fpk 的 web-ui 都是 `0.7.35`，于是「版本匹配，无需重装」，内核路径根本走不到。**包内新内核只对全新机器生效**，老装机界面里的内核版本纹丝不动（用户原话：「我更新了 APK 之后系统内显示的内核还是 0.22.0」），只能手动 `hermes update`。另一个坑：`install.sh` 只在 `USE_VENV=true` 时导出 `VIRTUAL_ENV`，对齐时若用 `--no-venv` 复用环境却不自己导出它，依赖会被装到系统解释器上（污染系统且内核仍缺依赖） | **版本闸门 + 原地对齐**：单一真源 `app/config/bootstrap/ensure-kernel.sh`（`decide/installed/bundled`；已装版本优先 `hermes --version` 以识别用户自升级，回退 `.fpk-kernel-version` → `.bundled-agent-ref`；判不出/更旧一律 skip，绝不猜不降级）；`upgrade_callback` 与 `install_callback` 都过该闸门；对齐 = 旧内核**移到备份**（不是 `rm -rf`）→ 复制包内源码 → **把 venv 搬回复用**（`--no-venv` + 显式导出 `VIRTUAL_ENV`，避免重下 Python 3.14 与全部依赖）→ 官方 installer 同步依赖 → postinstall 硬校验 → 失败**回滚**并写 `marker=rolled-back`（不能写 `failed`：`cmd/main` 见 failed 会 `rm -rf` 内核重装，会把刚恢复的可用内核又删掉）；成功后写 `.fpk-kernel-version`。CI 门禁 fail-closed：内层必含闸门脚本 + `install_callback` 必含 `prealign/rolled-back/--no-venv/rollback_or_fail` + `upgrade_callback` 必含 `decide` 接线 + `build.yml` 跑 `ensure-kernel-selftest.sh`（10 用例） |
 | 35 | **口径手抄多份 + 自检自证范围造假** —— 「只跟语义化 tag、拒绝日期式」这条规则同时抄在 `detect-upstream.py`、`build.yml`、`verify-fpk-gates.sh` 三处，且都写成 `v[0-9]+`/`\d+` 宽松形：注释与报错文本声明拒绝日期式，实现却放行上游的 `v2026.9.24`（major 是 4 位年份；上游 39 个 release 里 **36 个是日期式**）。当时没出事只因语义式恰好发布更晚。更糟的是第一版修复只收紧了两处、漏了第三处，而 selftest 只测自己的 Python 常量 —— 把 build.yml 改回宽松写法后 selftest 仍全绿，注释里「两侧由 selftest 钉住」是假的。另有空锚点静默兜底 `main`（与同文件「main 只允许显式写入」矛盾）、`published_at` 最新≠版本最高导致的锚点倒退、上游改回日期式后静默冻结 | **口径收敛为单一真源**：`detect-upstream.py` 的 `AGENT_TAG_PATTERN`/`ANCHOR_ERE`，限 major 最多 3 位（排 4 位年份又不误伤将来的 `v100.x.y`）；shell 侧一律调 `anchor-ok`/`gate-regex`，不再自带正则。**selftest 升级为四项契约**：① 标签串逐样本（含尾部换行脏值用 `fullmatch`）② 选取逻辑用构造 release 样本（prerelease/draft 过滤、`published_at` 排序、日期式让位）③ `ANCHOR_ERE` 与 Python 口径逐样本等价（且必须接受 `main`、拒绝空值）④ **全仓禁止宽松字面副本 + 消费方必须引用真源**。空锚点改为硬失败；tick 增加**倒退守卫**；两处静默失败路径打 `::error::`/`::warning::` 注解（埋在 6 小时长驻日志里等于没有）|
+| 36 | **升级 fpk 不更新内核（用户实测暴露）** —— `install_callback` 见 `venv/bin/hermes` 存在就 `return 0`，`upgrade_callback` 又只比 hermes-web-ui 版本；两版 fpk 的 web-ui 都是 `0.7.35`，于是「版本匹配，无需重装」，内核路径根本走不到。**包内新内核只对全新机器生效**，老装机界面里的内核版本纹丝不动（用户原话：「我更新了 APK 之后系统内显示的内核还是 0.22.0」），只能手动 `hermes update`。另一个坑：`install.sh` 只在 `USE_VENV=true` 时导出 `VIRTUAL_ENV`，对齐时若用 `--no-venv` 复用环境却不自己导出它，依赖会被装到系统解释器上（污染系统且内核仍缺依赖） | **版本闸门 + 原地对齐**：单一真源 `app/config/bootstrap/ensure-kernel.sh`（`decide/installed/bundled`；已装版本优先 `hermes --version` 以识别用户自升级，回退 `.fpk-kernel-version` → `.bundled-agent-ref`；判不出/更旧一律 skip，绝不猜不降级）；`upgrade_callback` 与 `install_callback` 都过该闸门；对齐 = 旧内核**移到备份**（不是 `rm -rf`）→ 复制包内源码 → **把 venv 搬回复用**（`--no-venv` + 显式导出 `VIRTUAL_ENV`，避免重下 Python 3.14 与全部依赖）→ 官方 installer 同步依赖 → postinstall 硬校验 → 失败**回滚**并写 `marker=rolled-back`（不能写 `failed`：`cmd/main` 见 failed 会 `rm -rf` 内核重装，会把刚恢复的可用内核又删掉）；成功后写 `.fpk-kernel-version`。CI 门禁 fail-closed：内层必含闸门脚本 + `install_callback` 必含 `prealign/rolled-back/--no-venv/rollback_or_fail` + `upgrade_callback` 必含 `decide` 接线 + `build.yml` 跑 `ensure-kernel-selftest.sh`（17 用例：10 判定 + 7 界面版本） |
+| 37 | **装完 fpk 界面版本显示无人验证（用户明确要求「更新后界面必须显示正常的当前版本」）** —— Studio 版本栏读的是 `hermes_cli.__version__`，它**只认内核树里的 `install-stamp.json` 的 `baseVersion`，不回退 git**：stamp 缺失/损坏 → 界面显示 `0.0.0`（而 `hermes --version` 同时还能显示 `git.<sha>`，两处不一致，极易误判成「内核坏了」）。旧 postinstall 的 stamp 写入是**软行为**（锚点解析不出/写失败只打 WARNING 就 `exit 0`），且「已有可用 stamp 就不动」——内嵌源码若自带 stamp 就会被留下，界面显示的不是本包版本。实测取证：把包内源码原样铺成内核树后跑 Studio 的探测命令 → `0.0.0`（`hermes --version` 显示 `git.35ce5d9`） | **显示版本硬门禁**：`ensure-kernel.sh` 新增 `displayed`（逐字执行 Studio 前端的探测命令 `python -c "...print(hermes_cli.__version__)"`）与 `assert-displayed`（第 1 行 `OK/MISMATCH/SKIP`，`v` 前缀走 `norm_ver` 归一化）；`install_callback` 在对齐/新装复制源码后先 `rm -f install-stamp.json`，再把本包锚点作 `--expect-version` 传给 postinstall；postinstall 在硬门禁模式下**强制按锚点重写** stamp（不符即重写）并断言界面显示值 == 锚点，不符则 `exit 1` → 对齐路径回滚旧内核。CI 门禁 fail-closed：内层必含 `ensure-kernel.sh` 的 `displayed/assert-displayed` 与**与前端一致的探测面**（`hermes_cli.__version__` + `find_spec('hermes_cli.main')`）、postinstall 必含 `--expect-version` + `assert-displayed` 调用、install_callback 必含两要素、包内锚点 == 内嵌源码 `.bundled-agent-ref` |
+| 38 | **门禁的 grep 把 `--no-venv` 当选项解析（run#7 构建红）** —— `printf '%s' "$IC" \| grep -qF "$need"`，`$need` 是以 `-` 开头的字面量时 grep 报 `unrecognized option '--no-venv'` → 断言恒判「缺失」→ 构建必红；同时 `printf \| grep -q` 命中即早退还有 SIGPIPE 假阴性风险 | 清单先写文件再 `grep -qF -- "$need" <file>`（`--` 终止选项解析）；本机干跑脚本对每条断言做变异验证（删掉要素必须判红，且不能只靠注释命中） |
 
 ---
 

@@ -595,6 +595,11 @@ rm -f "\${MARKER}"
         if ! cp -a "\${BUNDLED_AGENT_SRC}" "\${AGENT_ROOT}"; then
             fail "failed to copy bundled source to \${AGENT_ROOT}"
         fi
+        # 界面版本硬门禁的前置：内嵌源码若自带 install-stamp.json，postinstall 的
+        # 「已有可用 stamp 就不动」会把它留下 —— 而 Studio 版本栏显示的正是这个
+        # stamp，于是界面显示的不是本包锚点版本。本路径铺出来的树版本 = 本包锚点，
+        # 故先删，让 postinstall 按锚点重写（写完还要实测断言，见其第 4 步）。
+        rm -f "\${AGENT_ROOT}/install-stamp.json" 2>/dev/null || true
         # 更新通道自愈（幂等）：装机后必须能 `hermes update`。
         # ⛔ 不要锁进 `if [ ! -d .git ]` 分支 —— 那正是老 bug 的形态：
         #    bundle 自带 .git 时整段跳过，remote 永远补不上。
@@ -672,12 +677,20 @@ rm -f "\${MARKER}"
         fail "hermes command not found after install"
     fi
 
-    # 4b) FPK 内核完整性硬校验 + install-stamp 补写（2026-10-14 根因固化）。
-    #     venv Python <3.14 或 marker 依赖（openai/httpx/requests/pydantic…）
-    #     缺失时必须判失败 —— 残缺内核静默出厂，很久以后才以运行错误暴露，
-    #     无法归因。stamp 缺失只降级版本显示（脚本内部容错），不阻断安装。
-    echo ">>> Verifying kernel integrity (python>=3.14 / core deps / install-stamp) ..."
-    if ! bash "\${APP_DIR}/config/bootstrap/hermes-agent-postinstall.sh" "\${AGENT_ROOT}" "\${APP_DIR}"; then
+    # 4b) FPK 内核完整性硬校验 + install-stamp 补写 + 界面显示版本断言（2026-10-14
+    #     根因固化，2026-10-15 补显示门禁）。venv Python <3.14 或 marker 依赖
+    #     （openai/httpx/requests/pydantic…）缺失时必须判失败 —— 残缺内核静默出厂，
+    #     很久以后才以运行错误暴露，无法归因。
+    #     --expect-version = 本包锚点：让 postinstall 强制按锚点重写 install-stamp.json
+    #     并实测「Studio 版本栏会显示的值」等于锚点（不传则维持旧的软行为）。
+    #     只在【内嵌源码】路径传 —— 那时树里的内核版本就是本包锚点，断言成立；
+    #     网络 clone 路径拿到的可能是上游 main，不能拿锚点去卡它。
+    echo ">>> Verifying kernel integrity (python>=3.14 / core deps / install-stamp / displayed-version) ..."
+    POST_ARGS=""
+    if [ "\${OFFLINE_SRC_FLAG}" = "1" ] && [ -n "\${TARGET_AGENT_VER}" ]; then
+        POST_ARGS="--expect-version \${TARGET_AGENT_VER}"
+    fi
+    if ! bash "\${APP_DIR}/config/bootstrap/hermes-agent-postinstall.sh" "\${AGENT_ROOT}" "\${APP_DIR}" \${POST_ARGS}; then
         rollback_or_fail "post-install kernel verification failed (see log above)"
     fi
 

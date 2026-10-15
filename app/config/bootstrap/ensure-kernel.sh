@@ -19,9 +19,11 @@
 #   skip    = 已装版本 >= 内嵌版本，或任一侧版本无法判定（绝不猜、绝不降级）
 #
 # 用法：
-#   ensure-kernel.sh decide    <AGENT_ROOT> <APP_DIR>
-#   ensure-kernel.sh installed <AGENT_ROOT>
-#   ensure-kernel.sh bundled   <APP_DIR>
+#   ensure-kernel.sh decide           <AGENT_ROOT> <APP_DIR>
+#   ensure-kernel.sh installed        <AGENT_ROOT>
+#   ensure-kernel.sh bundled          <APP_DIR>
+#   ensure-kernel.sh displayed        <AGENT_ROOT>      # Studio 版本栏会显示的值
+#   ensure-kernel.sh assert-displayed <AGENT_ROOT> <期望版本>   # 装后硬门禁用
 #
 # ⛔ 调用方不得重抄版本解析/比较逻辑（本项目在别处重抄正则吃过亏：三处漏改两处，
 #    见 MAINTAINING 事故表）。行为契约由 scripts/ensure-kernel-selftest.sh 钉住，
@@ -106,9 +108,52 @@ decide() {
     return 0
 }
 
+# ── Studio 版本栏显示的值（唯一来源 = 前端探测命令）──────────────────────────
+# Studio 前端探测命令（逐字一致，改动前先核对 web-ui 的 getHermesVersion）：
+#   <venv>/bin/python3 -c "import importlib.util, hermes_cli; \
+#       assert importlib.util.find_spec('hermes_cli.main'); print(hermes_cli.__version__)"
+# hermes_cli.__version__ 只认 install-stamp.json 的 baseVersion，【不回退 git】——
+# stamp 缺失/损坏时界面显示 0.0.0（不是 git.<sha>）。所以「界面显示正常版本」等价于
+# 「stamp 存在且 = 本包锚点」，必须装后实测断言，不能拿安装脚本 exit 0 当证据。
+displayed_ver() {
+    local root="${1:-}" py="" cand
+    for cand in "${root}/venv/bin/python3" "${root}/venv/bin/python"; do
+        [ -x "${cand}" ] && { py="${cand}"; break; }
+    done
+    [ -n "${py}" ] || return 0
+    timeout 30 "${py}" -c "import importlib.util, hermes_cli; assert importlib.util.find_spec('hermes_cli.main'); print(hermes_cli.__version__)" 2>/dev/null \
+        | tr -d '[:space:]'
+    return 0
+}
+
+# assert-displayed <AGENT_ROOT> <期望版本>
+# stdout 第 1 行 = OK | MISMATCH | SKIP；返回 0/1（SKIP 返回 0：期望值本身不可判时
+# 不该把安装判死，只记日志）。期望值走 norm_ver，`v0.22.1` 与 `0.22.1` 等价。
+assert_displayed() {
+    local root="${1:-}" want got
+    want="$(norm_ver "${2:-}")"
+    got="$(displayed_ver "${root}")"
+    if [ -z "${want}" ]; then
+        printf 'SKIP\n期望版本缺失或非语义化（got=%s）—— 无法断言界面显示版本\n' "${2:-空}"
+        return 0
+    fi
+    if [ "${got}" = "${want}" ]; then
+        printf 'OK\n界面显示 %s == 期望 %s（install-stamp 生效）\n' "${got}" "${want}"
+        return 0
+    fi
+    if [ -f "${root}/install-stamp.json" ]; then
+        printf 'MISMATCH\n界面显示 %s != 期望 %s（install-stamp.json 在，但 baseVersion 不符）\n' "${got:-空}" "${want}"
+    else
+        printf 'MISMATCH\n界面显示 %s != 期望 %s（install-stamp.json 缺失 → 界面会显示 0.0.0）\n' "${got:-空}" "${want}"
+    fi
+    return 1
+}
+
 case "${1:-}" in
-    decide)    decide "${2:-}" "${3:-}" ;;
-    installed) installed_ver "${2:-}" ;;
-    bundled)   bundled_ver "${2:-}" ;;
-    *) echo "用法: $0 decide|installed|bundled <AGENT_ROOT> [APP_DIR]" >&2; exit 2 ;;
+    decide)           decide "${2:-}" "${3:-}" ;;
+    installed)        installed_ver "${2:-}" ;;
+    bundled)          bundled_ver "${2:-}" ;;
+    displayed)        displayed_ver "${2:-}" ;;
+    assert-displayed) assert_displayed "${2:-}" "${3:-}" ;;
+    *) echo "用法: $0 decide|installed|bundled|displayed|assert-displayed <AGENT_ROOT> [APP_DIR|期望版本]" >&2; exit 2 ;;
 esac

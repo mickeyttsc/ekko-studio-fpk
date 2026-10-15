@@ -19,6 +19,7 @@
 #   无构建机绝对路径    → 污染会导致 install_callback 找不到 node_modules
 #   无宽泛 pkill        → 会误杀同机 Docker 容器 / 其它 Hermes 应用
 #   DSH 凭据 600 保护   → 缺它升级一次「DSH 模式」下拉框就无限转圈
+#   界面显示版本        → 装完 fpk 版本栏必须显示本包锚点（stamp/探测链无人验证=静默错版本）
 #
 # ⛔ 不要把清单塞进变量再 `echo "$LIST" | grep ...`：
 #    内层 3 万多行（400KB+），`grep -q` 命中即早退 → echo 收 SIGPIPE(141)。
@@ -123,18 +124,35 @@ if ! grep -qE '^config/bootstrap/ensure-kernel\.sh$' "$TMP/inner.list"; then
 fi
 echo "✅ 内层含 config/bootstrap/ensure-kernel.sh（内核版本闸门）"
 
+# ⚠️ grep 的 $need 里有 `--no-venv`/`--expect-version` 这种以 `-` 开头的字面量：
+#    不加 `--` 会被 grep 当选项解析（`grep: unrecognized option '--no-venv'`）→
+#    断言恒判「缺失」，构建必红（2026-10-15 run#7 就是这么失败的）。
+#    另外清单写文件再 grep，避免 `printf | grep -q` 命中即早退引发的 SIGPIPE 假阴性。
 IC="$(grep -vE '^[[:space:]]*#' "$TMP/cmd/install_callback" || true)"
+printf '%s' "$IC" > "$TMP/ic.txt"
 for need in 'ensure-kernel.sh' 'prealign' 'rolled-back' '--no-venv' 'rollback_or_fail'; do
-    if ! printf '%s' "$IC" | grep -qF "$need"; then
+    if ! grep -qF -- "$need" "$TMP/ic.txt"; then
         echo "::error:: cmd/install_callback 缺少内核对齐要素: $need（缺了会导致升级不更新内核，或对齐失败后无法回滚）"
         exit 1
     fi
 done
 echo "✅ cmd/install_callback 含内核对齐（闸门/备份/回滚/复用 venv）"
 
+# 界面显示版本硬门禁的接线（Studio 版本栏 = install-stamp.json 的 baseVersion）：
+# 对齐/新装时先删内嵌源码可能自带的旧 stamp，再把本包锚点作为 --expect-version
+# 传给 postinstall —— 缺任一环，界面就会静默显示 0.0.0 或旧版本。
+for need in '--expect-version' 'install-stamp.json'; do
+    if ! grep -qF -- "$need" "$TMP/ic.txt"; then
+        echo "::error:: cmd/install_callback 缺界面显示版本硬门禁要素: $need（缺了会出现装完 fpk 界面显示 0.0.0/旧版本）"
+        exit 1
+    fi
+done
+echo "✅ cmd/install_callback 已接界面显示版本硬门禁（对齐前删 stamp + 传本包锚点）"
+
 UC="$(grep -vE '^[[:space:]]*#' "$TMP/cmd/upgrade_callback" || true)"
+printf '%s' "$UC" > "$TMP/uc.txt"
 for need in 'ensure-kernel.sh' 'decide' 'run_install_callback'; do
-    if ! printf '%s' "$UC" | grep -qF "$need"; then
+    if ! grep -qF -- "$need" "$TMP/uc.txt"; then
         echo "::error:: cmd/upgrade_callback 未接内核对齐: 缺 $need（web-ui 版本相同时内核仍不会更新）"
         exit 1
     fi
@@ -390,6 +408,22 @@ if ! grep -qE '^hermes-agent-src/pyproject\.toml$' "$TMP/inner.list"; then
 fi
 echo "✅ 检测到 Hermes Agent 离线源码包"
 
+# 内嵌源码的 ref 标记必须与包内锚点一致：界面显示的内核版本最终来自「包内锚点」，
+# 而内核对齐的判据来自这个 ref 标记 —— 两者不一致时，装出来的内核与界面显示的
+# 版本会各说各话（例：锚点写 v0.22.1、源码其实是 v0.22.0）。
+if ! grep -qE '^hermes-agent-src/\.bundled-agent-ref$' "$TMP/inner.list"; then
+    echo "::error:: 内层缺 hermes-agent-src/.bundled-agent-ref —— 内核版本闸门拿不到内嵌版本，装新 fpk 不会更新内核"
+    exit 1
+fi
+tar xzf "$TMP/app.tgz" -C "$TMP" hermes-agent-src/.bundled-agent-ref config/bootstrap/hermes-agent-version.env 2>/dev/null || true
+ANCHOR_VAL="$(grep -E '^HERMES_AGENT_VERSION=' "$TMP/config/bootstrap/hermes-agent-version.env" 2>/dev/null | head -1 | cut -d= -f2 | tr -d '[:space:]' || true)"
+REF_VAL="$(tr -d '[:space:]' < "$TMP/hermes-agent-src/.bundled-agent-ref" 2>/dev/null || true)"
+if [ -z "$ANCHOR_VAL" ] || [ -z "$REF_VAL" ] || [ "$ANCHOR_VAL" != "$REF_VAL" ]; then
+    echo "::error:: 包内锚点('$ANCHOR_VAL')与内嵌源码 ref 标记('$REF_VAL')不一致 —— 装出来的内核版本与界面显示的版本会各说各话，构建中止"
+    exit 1
+fi
+echo "✅ 包内锚点与内嵌源码 ref 一致（$REF_VAL）"
+
 if ! grep -qE '^hermes-agent-node/node_modules/' "$TMP/inner.list"; then
     echo "::error:: FPK 未包含 hermes-agent-node/node_modules，首启仍会联网跑 npm install，构建中止"
     exit 1
@@ -579,6 +613,36 @@ if ! grep -q 'FPK-DYNFLOOR' "$TMP/config/bootstrap/hermes-agent-postinstall.sh" 
     fi
 fi
 echo "✅ 装后内核完整性校验已内嵌且失败即判安装失败（动态地板+动态依赖完整性）"
+
+# 4) 界面显示版本（Studio 版本栏）门禁必须随包且接线。
+#    版本口径唯一真源 = ensure-kernel.sh，且探测命令必须与 Studio 前端逐字一致
+#    （hermes_cli.__version__ + find_spec('hermes_cli.main')）—— 换了探测面就不再
+#    代表界面显示的值，那样断言等于白写。
+tar xzf "$TMP/app.tgz" -C "$TMP" config/bootstrap/ensure-kernel.sh 2>/dev/null || true
+if [ ! -f "$TMP/config/bootstrap/ensure-kernel.sh" ]; then
+    echo "::error:: 内层 app.tgz 解不出 config/bootstrap/ensure-kernel.sh（界面版本判定真源丢失）"
+    exit 1
+fi
+for need in 'displayed' 'assert-displayed' 'hermes_cli.__version__' "find_spec('hermes_cli.main')"; do
+    if ! grep -qF "$need" "$TMP/config/bootstrap/ensure-kernel.sh"; then
+        echo "::error:: ensure-kernel.sh 缺界面显示版本判定要素: $need（装了新 fpk 也没人验证界面显示的是不是本包版本）"
+        exit 1
+    fi
+done
+echo "✅ ensure-kernel.sh 含界面显示版本判定（探测面与 Studio 前端一致）"
+
+if ! grep -q 'assert-displayed' "$TMP/config/bootstrap/hermes-agent-postinstall.sh" 2>/dev/null; then
+    tar xzf "$TMP/app.tgz" -C "$TMP" config/bootstrap/hermes-agent-postinstall.sh 2>/dev/null || true
+fi
+if ! grep -q 'assert-displayed' "$TMP/config/bootstrap/hermes-agent-postinstall.sh" 2>/dev/null; then
+    echo "::error:: hermes-agent-postinstall.sh 未调用 ensure-kernel.sh assert-displayed —— 装完 fpk 界面显示版本无人断言，构建中止"
+    exit 1
+fi
+if ! grep -q -- '--expect-version' "$TMP/config/bootstrap/hermes-agent-postinstall.sh" 2>/dev/null; then
+    echo "::error:: hermes-agent-postinstall.sh 不认 --expect-version —— install_callback 的界面版本硬门禁传参无效，构建中止"
+    exit 1
+fi
+echo "✅ 装后界面显示版本已接硬门禁（--expect-version + assert-displayed，不符即回滚）"
 
 # ── 反自检：确保上面的门禁真的会拦 ──
 # 所有检查都依赖 grep 的返回值。若有人改回 `echo "$BIG" | grep -q ...`，
