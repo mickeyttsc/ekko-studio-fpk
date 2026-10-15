@@ -394,11 +394,16 @@ echo "✅ bundled 产物出厂带 iframe 补丁（XFO=ALLOWALL, frame-ancestors 
 # 白名单必须只有与机器无关的静态项 + 运行时枚举。若出现私有网段 IP、IPv6 字面量
 # （::1 除外）或域名，说明打包者的内网地址/域名被烤进了公开产物 ——
 # 既泄露隐私，也让别人的机器用不了（各家入口地址/域名都不同）。
+# ⚠️ 例外：fnOS 官方远程域（fnos.net / 5ddd.com / trzznas.com）是【产品常量】——
+#    不是打包者私有物、对所有使用者都成立（Connect/手机 App 的桌面地址就在这些域下），
+#    必须有，否则远程小窗被自家 CSP 拦成「拒绝连接」（2026-10-15 真根因）。
+#    这里用产品常量白名单放行，其余任何域名仍然判红。
 WL="$(tar xzOf "$TMP/app.tgz" node/lib/node_modules/hermes-web-ui/dist/server/index.js 2>/dev/null \
       | grep -oE "frame-ancestors 'self' [^\"]*" | head -1)"
 PRIV_IP="$(printf '%s\n' "$WL" | grep -oE 'https?://(10\.[0-9.]+|192\.168\.[0-9.]+|172\.(1[6-9]|2[0-9]|3[01])\.[0-9.]+)' | sort -u | tr '\n' ' ' || true)"
 V6_LIT="$(printf '%s\n' "$WL" | grep -oE 'https?://\[[0-9a-fA-F:]+\]' | grep -v '\[::1\]' | sort -u | tr '\n' ' ' || true)"
-DOMAIN="$(printf '%s\n' "$WL" | grep -oE 'https?://[A-Za-z0-9][A-Za-z0-9._-]*\.[A-Za-z]{2,}' | grep -v 'localhost' | sort -u | tr '\n' ' ' || true)"
+DOMAIN="$(printf '%s\n' "$WL" | grep -oE 'https?://[A-Za-z0-9][A-Za-z0-9._-]*\.[A-Za-z]{2,}' | grep -v 'localhost' \
+    | grep -vE '^https?://([A-Za-z0-9._-]*\.)?(fnos\.net|5ddd\.com|trzznas\.com)$' | sort -u | tr '\n' ' ' || true)"
 if [ -n "${PRIV_IP}${V6_LIT}${DOMAIN}" ]; then
     echo "::error:: 产物白名单含机器/个人绑定信息（私有IP=[${PRIV_IP}] IPv6=[${V6_LIT}] 域名=[${DOMAIN}]）—— 泄露打包者隐私且他人机器不可用，构建中止"
     exit 1
