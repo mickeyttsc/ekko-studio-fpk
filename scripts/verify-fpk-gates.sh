@@ -166,6 +166,18 @@ echo "✅ cmd/upgrade_callback 已接内核对齐（升级路径可达）"
 # 最终按 cliproxyapi 形态收敛为「单入口 + 字面量端口 + allUsers:true + 无向导端口」。
 # 因此这里改为断言「ui/config 的 port 必须与 manifest 的 service_port 一致」——
 # 两者错位时桌面入口指向的端口与实际监听端口不同（页面打不开），比可改端口重要。
+if ! grep -qE '^ui/config$' "$TMP/inner.list"; then
+    echo "::error:: 内层缺 ui/config，桌面图标无法注册"
+    exit 1
+fi
+# 本门禁需要 ui/config 与 manifest 两份文件，就地解包（步骤间不共享状态，
+# 且后续段落各自的解包在本段之后才发生 —— 少解一份就会 FileNotFoundError）。
+tar xzf "$TMP/app.tgz" -C "$TMP" ui/config 2>/dev/null || true
+tar xzf "$FPK" manifest -C "$TMP" 2>/dev/null || true
+if [ ! -f "$TMP/ui/config" ] || [ ! -f "$TMP/manifest" ]; then
+    echo "::error:: 解包 ui/config 或 manifest 失败，无法校验入口端口一致性（构建中止）"
+    exit 1
+fi
 UV_PORT="$(python3 - "$TMP/ui/config" <<'PY'
 import json, sys
 cfg = json.load(open(sys.argv[1], encoding='utf-8'))
