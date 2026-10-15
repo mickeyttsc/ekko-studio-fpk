@@ -12,36 +12,11 @@
             },
             {
                 "type": "tips",
-                "helpText": "<br>安装后首次启动会在后台准备 Hermes Agent 内核（已内置离线源码包，约 1-3 分钟）。期间页面即可打开，但对话功能要等内核就绪。"
+                "helpText": "<br>Web 界面固定监听端口 <b>8648</b>（与桌面入口一致，不可修改）。安装后首次启动会在后台准备 Hermes Agent 内核（已内置离线源码包，约 1-3 分钟）。期间页面即可打开，但对话功能要等内核就绪。"
             },
             {
                 "type": "tips",
                 "helpText": "<br>完成后点击桌面图标即可在浏览器打开，默认账号 <b>admin / 123456</b>；登录后请在「设置」中配置模型 API Key 再开始使用。"
-            }
-        ]
-    },
-    {
-        "stepTitle": "服务端口",
-        "items": [
-            {
-                "type": "tips",
-                "helpText": "<br>Ekko Studio 的 Web 界面监听端口。默认 <b>8648</b>；若该端口已被其它应用占用，请改成空闲端口（桌面图标会自动跟随该值）。"
-            },
-            {
-                "type": "text",
-                "field": "wizard_port",
-                "label": "Web 服务端口",
-                "initValue": "8648",
-                "rules": [
-                    {
-                        "required": true,
-                        "message": "请填写服务端口"
-                    },
-                    {
-                        "pattern": "^[0-9]+$",
-                        "message": "端口只能是数字"
-                    }
-                ]
             }
         ]
     },

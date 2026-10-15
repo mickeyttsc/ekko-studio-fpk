@@ -161,16 +161,48 @@ echo "✅ cmd/upgrade_callback 已接内核对齐（升级路径可达）"
 
 # 桌面入口必须是 ${wizard_port}（端口可配）而不是写死值：
 # 写死会让「应用设置里改端口」失效 —— 入口跟着变、服务还在老端口，页面打不开。
-if ! grep -qE '^ui/config$' "$TMP/inner.list"; then
-    echo "::error:: 内层缺 ui/config，桌面图标无法注册"
+#
+# ⚠️ 2026-10-15 推翻（见 MAINTAINING #41）：端口模板化会让 fnOS 远程链路失效，
+# 最终按 cliproxyapi 形态收敛为「单入口 + 字面量端口 + allUsers:true + 无向导端口」。
+# 因此这里改为断言「ui/config 的 port 必须与 manifest 的 service_port 一致」——
+# 两者错位时桌面入口指向的端口与实际监听端口不同（页面打不开），比可改端口重要。
+UV_PORT="$(python3 - "$TMP/ui/config" <<'PY'
+import json, sys
+cfg = json.load(open(sys.argv[1], encoding='utf-8'))
+for name, item in (cfg.get('.url') or {}).items():
+    if (item or {}).get('port'):
+        print(str(item['port']).strip()); break
+PY
+)"
+MPORT="$(grep -E '^service_port[[:space:]]*=' "$TMP/manifest" | head -1 | cut -d= -f2 | tr -d '[:space:]')"
+if [ -z "${UV_PORT}" ] || [ -z "${MPORT}" ] || [ "${UV_PORT}" != "${MPORT}" ]; then
+    echo "::error:: ui/config 入口端口('${UV_PORT}') 与 manifest service_port('${MPORT}') 不一致 —— 桌面入口会指向错端口，构建中止"
     exit 1
 fi
-tar xzf "$TMP/app.tgz" -C "$TMP" ui/config
-if ! grep -q '\${wizard_port}' "$TMP/ui/config"; then
-    echo "::error:: ui/config 的 port 未使用 \${wizard_port}，端口将无法在应用设置中修改"
+echo "✅ ui/config 入口端口 == manifest service_port（${UV_PORT}，单一真源）"
+
+# 主入口必须 allUsers:true（远程访问的权限前提）：
+# allUsers:false → 系统把该入口标记为 admin-only（trim_sac.entry.is_admin=true），
+# fnOS Connect（远程访问）小窗打开时被权限拦住（"暂无权限访问该服务"）。
+# 全机对照：能远程打开的第三方 iframe 应用（cliproxyapi/cleanfnos/wildwork）都是
+# allUsers:true；我们是唯一 allUsers:false 的（2026-10-15 实测，见 MAINTAINING #41）。
+if ! python3 - "$TMP/ui/config" <<'PY'
+import json, sys
+cfg = json.load(open(sys.argv[1], encoding='utf-8'))
+urls = cfg.get('.url') or {}
+if not urls:
+    print("ui/config 缺 .url 段", file=sys.stderr); sys.exit(1)
+for name, item in urls.items():
+    if (item or {}).get('allUsers') is not True:
+        print(f"{name}: allUsers={(item or {}).get('allUsers')!r}（远程访问要求 true：false 会变成 admin-only 入口）", file=sys.stderr)
+        sys.exit(1)
+sys.exit(0)
+PY
+then
+    echo "::error:: ui/config 存在非 allUsers:true 的入口 —— 远程访问会被权限拦住，构建中止"
     exit 1
 fi
-echo "✅ ui/config 端口使用 \${wizard_port}（可在应用设置中修改）"
+echo "✅ ui/config 入口均为 allUsers:true（远程访问权限前提）"
 
 # ── 远程访问（fnOS Connect）链路：manifest 必须声明 service_port 且不得声明 micro_app ──
 # ① service_port：系统据此注入 TRIM_SERVICE_PORT，并据此为 Connect 建立端口上游。
@@ -233,57 +265,6 @@ then
     exit 1
 fi
 echo "✅ ui/config protocol 规则正确（带 port 的入口显式 http；路径型入口允许自适应）"
-
-# ── 远程访问（fnOS Connect）入口：统一网关路径型，必须随包且接线 ──
-# 2026-10-15 用户实测：端口型入口在 Connect（远程访问）下走
-# https://<app>.<域名> 子域路由，本机不可达（浏览器 ERR_CONNECTION_REFUSED）；
-# 而已验证可远程的第三方应用（wild-work）用的是「统一网关 + 路径型入口 + 本地
-# unix socket 桥」。本应用采用同一形态：主入口走 /app/hermes-studio，
-# 由 cmd/main 启动 gw-bridge.mjs 把该 socket 桥到 127.0.0.1:<PORT>。
-if ! python3 - "$TMP/ui/config" <<'PY'
-import json, sys
-cfg = json.load(open(sys.argv[1], encoding='utf-8'))
-urls = cfg.get('.url') or {}
-main = urls.get('hermes-studio.Application') or {}
-if main.get('gatewaySocket') != 'app.sock':
-    print(f"主入口 gatewaySocket={main.get('gatewaySocket')!r}（应为 'app.sock'：远程访问入口靠它接系统网关）", file=sys.stderr); sys.exit(1)
-if main.get('gatewayPrefix') != '/app/hermes-studio':
-    print(f"主入口 gatewayPrefix={main.get('gatewayPrefix')!r}（应为 '/app/hermes-studio'）", file=sys.stderr); sys.exit(1)
-if main.get('port'):
-    print("主入口同时声明了 port，会退回子域路由（远程不可达）", file=sys.stderr); sys.exit(1)
-if (main.get('url') or '') != '/app/hermes-studio':
-    print(f"主入口 url={main.get('url')!r}（应等于 gatewayPrefix）", file=sys.stderr); sys.exit(1)
-if not any((it or {}).get('port') for it in urls.values()):
-    print("缺少带 port 的端口直连入口（局域网备用入口）", file=sys.stderr); sys.exit(1)
-sys.exit(0)
-PY
-then
-    echo "::error:: ui/config 的远程访问入口不合规（统一网关 gatewaySocket/gatewayPrefix 缺失或与 port 混用）—— 构建中止"
-    exit 1
-fi
-echo "✅ 远程访问入口 = 统一网关路径型（/app/hermes-studio → app.sock），并保留端口直连入口"
-
-# 网关桥脚本必须随包，且 cmd/main 必须启动/停止它（定义了不调用 = 远程入口空转）
-if ! grep -qE '^bin/gw-bridge\.mjs$' "$TMP/inner.list"; then
-    echo "::error:: 内层缺 bin/gw-bridge.mjs —— 统一网关 socket 无人桥接，远程访问入口必打不开"
-    exit 1
-fi
-for need in 'gw-bridge.mjs' '/app/hermes-studio'; do
-    if ! grep -qF -- "$need" "$TMP/main.code"; then
-        echo "::error:: cmd/main 缺网关桥要素: $need（缺了 = 远程访问入口没人拉起/没人清理）"
-        exit 1
-    fi
-done
-# 定义 ≠ 调用：只查字符串存在时，`foo() {` 这行也算命中（干跑变异实测漏拦）。
-# 两条都要「定义 + 调用」各出现 ≥1 次才放行 —— 与 iframe 补丁门禁同款判据。
-for fn in start_gateway_bridge stop_gateway_bridge; do
-    n="$(grep -cE "(^|[^_a-zA-Z])${fn}([^_a-zA-Z]|$)" "$TMP/main.code" || true)"
-    if [ "${n:-0}" -lt 2 ]; then
-        echo "::error:: cmd/main 的 ${fn} 出现 ${n:-0} 次（应 ≥2：定义 + 调用）—— 远程访问入口会空转（起了没人停 / 定义了没人起）"
-        exit 1
-    fi
-done
-echo "✅ 网关桥脚本随包且已在 cmd/main 接线（启动/停止均为「定义+调用」）"
 
 # 桌面入口必须是 iframe（小窗模式）：type=url 会跳新浏览器标签页，
 # 用户明确要求点击图标在 fnOS 桌面窗口内嵌打开（2026-10-14 拍板）。

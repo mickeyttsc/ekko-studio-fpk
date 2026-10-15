@@ -4,27 +4,10 @@
             "title": "Ekko Studio",
             "icon": "images/icon_{0}.png",
             "type": "iframe",
-            "protocol": "",
-            "gatewaySocket": "app.sock",
-            "gatewayPrefix": "/app/hermes-studio",
-            "url": "/app/hermes-studio",
-            "allUsers": false,
-            "control": {
-                "accessPerm": "editable"
-            }
-        },
-        "hermes-studio.direct": {
-            "title": "Ekko Studio 直连",
-            "icon": "images/icon_{0}.png",
-            "type": "iframe",
             "protocol": "http",
-            "port": "${wizard_port}",
+            "port": "8648",
             "url": "/",
-            "allUsers": false,
-            "control": {
-                "accessPerm": "editable",
-                "portPerm": "editable"
-            }
+            "allUsers": true
         }
     }
 }

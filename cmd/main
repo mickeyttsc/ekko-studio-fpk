@@ -52,13 +52,11 @@ NODE_PREFIX="${DATA_DIR}/node"
 HERMES_BIN="${NODE_PREFIX}/lib/node_modules/hermes-web-ui/bin/hermes-web-ui.mjs"
 LOG_FILE="${TRIM_PKGVAR:-/tmp/hermes-studio-var}/info.log"
 WEB_UI_HOME="${DATA_DIR}"
-# 端口三级优先级（官方打包文档 §8.3 的同款顺序）：
-#   ① wizard_port   —— 安装向导 / 应用设置里用户选的端口（最高优先，能反映用户改动）
-#   ② TRIM_SERVICE_PORT —— 系统按 manifest 的 service_port 注入；也是 fnOS Connect
-#      （远程访问）建立端口上游的依据，故 manifest 里必须声明 service_port
-#   ③ 默认 8648
-PORT="${wizard_port:-${TRIM_SERVICE_PORT:-${HERMES_PORT:-8648}}}"
-# 端口来自安装向导（wizard_port）或环境变量，视为不可信输入：
+# 端口来源：TRIM_SERVICE_PORT（系统按 manifest 的 service_port=8648 注入）→ 默认 8648。
+# ⛔ 不再读 wizard_port：入口端口已收敛为 ui/config 的字面量 8648（照 cliproxyapi 形态，
+#    见 MAINTAINING #41），向导里的端口字段会与入口错位，故一并移除（列表单一真源）。
+PORT="${TRIM_SERVICE_PORT:-${HERMES_PORT:-8648}}"
+# 端口来自系统注入或环境变量，视为不可信输入：
 # 非数字 / 越界一律回落到默认值，避免把坏值传给 node 或写进桌面入口。
 case "${PORT}" in
     ''|*[!0-9]*) PORT=8648 ;;
@@ -441,7 +439,6 @@ clean_residual_processes() {
     local pats=(
         "${NODE_PREFIX}/lib/node_modules/hermes-web-ui"
         "${HERMES_AGENT_ROOT}/venv/bin/hermes"
-        "${TRIM_APPDEST}/bin/gw-bridge.mjs"
     )
     local pat
     for pat in "${pats[@]}"; do
@@ -458,9 +455,6 @@ clean_residual_processes() {
 # 清理残留运行时文件，避免新实例被旧 PID / 日志 / IPC socket 误导。
 clean_residual_files() {
     rm -f "${WEB_UI_HOME}/server.pid" 2>/dev/null || true
-    # 统一网关桥的 unix socket：上一实例被 SIGKILL 时会留下死 socket，
-    # 新桥启动时会自行探测接管（见 gw-bridge.mjs），这里先清更干净。
-    rm -f "${TRIM_APPDEST}/app.sock" 2>/dev/null || true
     rm -f /tmp/hermes-agent-bridge.sock 2>/dev/null || true
     rm -f /tmp/hermes-web-ui.sock 2>/dev/null || true
     # 重命名旧 server.log，避免 status/start 把旧日志里的 "listening" 当成当前状态
@@ -905,58 +899,6 @@ ensure_port_released() {
     return 0
 }
 
-# ── 统一网关桥（fnOS 桌面小窗 / Connect 远程访问入口）─────────────────────────
-# 入口形态 = ui/config 的 gatewaySocket + gatewayPrefix：系统把 /app/hermes-studio
-# 下的请求下发到本应用的 unix socket，桥剥掉前缀后转发到 127.0.0.1:${PORT}。
-# 这是 fnOS 自家应用与已实测可远程的第三方应用（wild-work）所用形态；端口型入口
-# 在 Connect 下走 https://<app>.<域名> 子域路由，本机实测不可达（MAINTAINING #39/#40）。
-BRIDGE_BIN="${TRIM_APPDEST}/bin/gw-bridge.mjs"
-BRIDGE_SOCK="${TRIM_APPDEST}/app.sock"
-BRIDGE_PREFIX="/app/hermes-studio"
-BRIDGE_PID_FILE="${TRIM_PKGVAR}/gw-bridge.pid"
-
-bridge_running() {
-    [ -S "${BRIDGE_SOCK}" ] || return 1
-    "${NODE_BIN}" -e '
-const net = require("net");
-const s = net.connect(process.argv[1]);
-s.on("connect", () => { s.destroy(); process.exit(0); });
-s.on("error", () => process.exit(1));
-setTimeout(() => process.exit(1), 1500);
-' "${BRIDGE_SOCK}" >/dev/null 2>&1
-}
-
-stop_gateway_bridge() {
-    if [ -f "${BRIDGE_PID_FILE}" ]; then
-        local pid
-        pid="$(cat "${BRIDGE_PID_FILE}" 2>/dev/null || true)"
-        [ -n "${pid}" ] && kill "${pid}" 2>/dev/null || true
-        rm -f "${BRIDGE_PID_FILE}" 2>/dev/null || true
-    fi
-    pkill -f "${BRIDGE_BIN}" 2>/dev/null || true
-    rm -f "${BRIDGE_SOCK}" 2>/dev/null || true
-}
-
-start_gateway_bridge() {
-    if [ ! -f "${BRIDGE_BIN}" ]; then
-        log_msg "WARNING: ${BRIDGE_BIN} 缺失（构建门禁本应拦下）—— 桌面小窗/远程访问入口不可用，局域网直连仍可用"
-        return 1
-    fi
-    stop_gateway_bridge
-    nohup "${NODE_BIN}" "${BRIDGE_BIN}" "${BRIDGE_SOCK}" "${BRIDGE_PREFIX}" "127.0.0.1:${PORT}" >> "${LOG_FILE}" 2>&1 &
-    echo "$!" > "${BRIDGE_PID_FILE}" 2>/dev/null || true
-    local i
-    for i in $(seq 1 20); do
-        if bridge_running; then
-            log_msg "gateway bridge ready: ${BRIDGE_SOCK} (${BRIDGE_PREFIX}) -> 127.0.0.1:${PORT}"
-            return 0
-        fi
-        sleep 0.5
-    done
-    log_msg "WARNING: gateway bridge 未就绪（${BRIDGE_SOCK}）—— 远程访问入口可能打不开，局域网直连仍可用"
-    return 1
-}
-
 start_process() {
     # 启动前强制清理：杀掉所有 Hermes 相关残留进程、释放 8648 端口、
     # 清理 socket/PID/旧日志。这能解决"v18 能启动但页面打不开"、
@@ -1031,7 +973,6 @@ start_process() {
     for i in $(seq 1 120); do
         if is_port_listening "$PORT"; then
             log_msg "started, port ${PORT} listening"
-            start_gateway_bridge || true
             if [ "${agent_ready}" != "1" ]; then
                 start_agent_ready_watchdog
             fi
@@ -1047,7 +988,6 @@ start_process() {
         if ! grep -qE "FATAL: Failed to start|EADDRINUSE|bootstrap-error" "${WEB_UI_HOME}/server.log" 2>/dev/null \
            && grep -qE "listening on 0\.0\.0\.0:${PORT}|app\.listen called" "${WEB_UI_HOME}/server.log" 2>/dev/null; then
             log_msg "started, server log reports listening on port ${PORT}"
-            start_gateway_bridge || true
             if [ "${agent_ready}" != "1" ]; then
                 start_agent_ready_watchdog
             fi
@@ -1064,7 +1004,6 @@ stop_process() {
     if [ -e "$HERMES_BIN" ]; then
         "${NODE_BIN}" "${HERMES_BIN}" stop >> "${LOG_FILE}" 2>&1 || true
     fi
-    stop_gateway_bridge
     # 兜底：清理所有相关子进程
     clean_residual_processes
     clean_residual_files
