@@ -12,7 +12,7 @@
 | 服务端口 | `8648`（默认；可在「应用设置」中修改） |
 | 内置内核 | hermes-agent `v0.22.1`（离线源码包，首启免联网） |
 | 上游版本 | hermes-web-ui `0.7.35` |
-| 产物文件名 | `fnos-ekko-studio_v<版本>.fpk`（滚动最新：`fnos-ekko-studio.fpk`） |
+| 产物文件名 | `fnos-ekko-studio_v<版本>.fpk` |
 
 ## 本包改动（相对上游原版）
 
@@ -29,8 +29,7 @@
 
 ## 下载与安装
 
-- 滚动最新版：<https://github.com/mickeyttsc/ekko-studio-fpk/releases/download/latest/fnos-ekko-studio.fpk>
-- 固定版本：见 [Releases](https://github.com/mickeyttsc/ekko-studio-fpk/releases) 页附件（`fnos-ekko-studio_v<版本>.fpk`）
+- 下载：见 [Releases](https://github.com/mickeyttsc/ekko-studio-fpk/releases) 页附件（`fnos-ekko-studio_v<版本>.fpk`）
 - 安装：飞牛应用中心 → 手动安装 → 选择 fpk。
 
 ## 维护

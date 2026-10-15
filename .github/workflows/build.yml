@@ -384,36 +384,6 @@ jobs:
           bash scripts/verify-fpk-gates.sh \
             "dist/fnos-${{ env.APP_NAME }}_v${{ steps.target_version.outputs.target_version }}.fpk"
 
-      # 额外生成一个固定文件名，便于「总是下载最新版」
-      - name: Copy to rolling asset name
-        run: |
-          set -euo pipefail
-          cp "dist/fnos-${{ env.APP_NAME }}_v${{ steps.target_version.outputs.target_version }}.fpk" \
-             "dist/fnos-${{ env.APP_NAME }}.fpk"
-          echo "已生成 dist/fnos-${{ env.APP_NAME }}.fpk"
-
-      # ⚠️ 本步骤【不带 ref 门禁】：三条触发路径（push / dispatch / workflow_run）
-      #    的 github.ref 都是 refs/heads/main。若写成 startsWith(github.ref,
-      #    'refs/tags/')，这些运行会静默跳过发布 —— run 全绿但仓库里永远没有
-      #    Release，下游拿 releases/tags/<tag> 得到 null → 404 → 整条链路红。
-      - name: Publish rolling release (latest)
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: latest
-          name: "Latest FPK (auto-build)"
-          prerelease: true
-          overwrite: true
-          files: |
-            dist/fnos-${{ env.APP_NAME }}.fpk
-            dist/fnos-${{ env.APP_NAME }}_v${{ steps.target_version.outputs.target_version }}.fpk
-          body: |
-            Ekko Studio for fnOS — 滚动最新版（每次构建自动覆盖）
-
-            - 包名：hermes-studio ｜ 端口：8648
-            - 当前版本：`${{ steps.target_version.outputs.target_version }}` ｜ 提交：`${{ github.sha }}` ｜ 生成时间：${{ github.event.head_commit.timestamp }}
-            - 内核 / 上游版本与改动清单：见仓库 README
-
-            > 固定版本请下载带版本号的附件 `fnos-ekko-studio_v${{ steps.target_version.outputs.target_version }}.fpk`。
 
       # 稳定版 Release：每次构建都发（tag = v<版本号>）。
       # 同名 asset 用 overwrite 覆盖 —— 注意因此「版本号没 bump 的重建会覆盖同名
@@ -438,7 +408,7 @@ jobs:
           2. 首次启动后台完成内核就绪（内置离线包，约 1-3 分钟）。
           3. 点击应用图标在 fnOS 桌面小窗打开（默认端口 8648）。
 
-          固定版本附件：fnos-ekko-studio_v${{ steps.target_version.outputs.target_version }}.fpk ｜ 滚动最新版见 Release latest。
+          附件：fnos-ekko-studio_v${{ steps.target_version.outputs.target_version }}.fpk
           NOTE
           sed -i "s/__WEBUI__/${HERMES_WEBUI_VER}/; s/__AGENT__/${HERMES_AGENT_VER}/" /tmp/relnotes.md
           echo "稳定版发布说明已生成：/tmp/relnotes.md"
@@ -477,5 +447,4 @@ jobs:
             echo "| FPK 文件名 | fnos-${{ env.APP_NAME }}_v${{ steps.target_version.outputs.target_version }}.fpk |"
             echo "| sha256 | \`${SHA}\` |"
             echo ""
-            echo "滚动最新版见 Release **latest** 的附件 \`fnos-${{ env.APP_NAME }}.fpk\`。"
           } >> $GITHUB_STEP_SUMMARY
