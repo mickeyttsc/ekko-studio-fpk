@@ -118,6 +118,31 @@ else
     run_install_callback
 fi
 
+# ---------------------------------------------------------------------------
+# 3b. 内核对齐：web-ui 版本一致时也要检查包内内核是否比已装内核新
+#     历史行为（用户实测暴露）：升级只换 web-ui，内核永不更新 —— install_callback
+#     见 venv/bin/hermes 存在就 return，而本文件又只比 web-ui 版本，于是「装了新
+#     fpk，界面里的内核版本纹丝不动」，用户只能手动 hermes update。
+#     现在：由唯一真源 ensure-kernel.sh 判定；落后则复用 install_callback 的完整
+#     流程（内含备份 + 失败回滚 + 复用 venv）；相同/更旧/判不出则一律不动。
+# ---------------------------------------------------------------------------
+KERNEL_ENSURE="${APP_DIR}/config/bootstrap/ensure-kernel.sh"
+if [ ! -f "${KERNEL_ENSURE}" ]; then
+    KERNEL_ENSURE="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)/config/bootstrap/ensure-kernel.sh"
+fi
+if [ -f "${KERNEL_ENSURE}" ]; then
+    KDEC_OUT="$(bash "${KERNEL_ENSURE}" decide "${HERMES_AGENT_ROOT}" "${APP_DIR}" 2>/dev/null || true)"
+    KDEC="$(printf '%s\n' "${KDEC_OUT}" | head -1)"
+    KWHY="$(printf '%s\n' "${KDEC_OUT}" | sed -n '2p')"
+    log_msg "kernel decide: ${KDEC:-unknown} — ${KWHY:-无判定}"
+    if [ "${KDEC}" = "upgrade" ]; then
+        log_msg "包内内核较新 → 触发内核对齐（复用 install_callback 流程）"
+        run_install_callback
+    fi
+else
+    log_msg "WARNING: 缺 config/bootstrap/ensure-kernel.sh → 跳过内核对齐（退回旧行为：只更新 web-ui）"
+fi
+
 ACTUAL_VER=$("${NODE_BIN}" "${HERMES_BIN}" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "unknown")
 log_msg "hermes-web-ui now: ${ACTUAL_VER}"
 

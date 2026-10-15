@@ -345,10 +345,62 @@ BUNDLED_AGENT_SRC="${APP_DIR}/hermes-agent-src"
 # 额外问题：很多 NAS 无法稳定连接 GitHub，git clone 会报 GnuTLS recv error，
 # 导致 Agent 一直卡在克隆阶段、应用显示 starting。如果 FPK 内嵌了源码包
 # app/hermes-agent-src，则直接复制到目标目录并跳过网络 clone/fetch。
-ensure_hermes_agent_background() {
-    if [ -x "${HERMES_AGENT_ROOT}/venv/bin/hermes" ]; then
-        log_msg "Hermes Agent already installed at ${HERMES_AGENT_ROOT}"
+# 内核版本闸门：判定真源 = config/bootstrap/ensure-kernel.sh（版本解析/比较只在
+# 那里，本文件不得重抄正则 —— 重抄过一次，三处漏改两处）。
+# 解析顺序：内层 ${APP_DIR}/config/bootstrap（随包，正常路径）→ 外层同目录（兼容
+# 部分安装流程只把外层 config 铺到 cmd/ 旁的情形）。
+resolve_kernel_ensure() {
+    local cand
+    for cand in "${APP_DIR}/config/bootstrap/ensure-kernel.sh" \
+                "$(dirname "$0")/../config/bootstrap/ensure-kernel.sh"; do
+        [ -f "${cand}" ] && { printf '%s' "${cand}"; return 0; }
+    done
+    return 1
+}
+
+# 输出两行：判定（fresh|upgrade|skip）+ 理由。脚本缺失/执行失败一律降级成 skip
+# 并说明原因 —— 闸门坏掉时保守不动内核，绝不因为辅助脚本问题去重装内核。
+kernel_decide() {
+    local s out
+    s="$(resolve_kernel_ensure || true)"
+    if [ -z "${s}" ]; then
+        printf 'skip\n%s\n' "ensure-kernel.sh 未随包（构建门禁本应拦下）—— 保守不动内核"
         return 0
+    fi
+    out="$(bash "${s}" decide "${HERMES_AGENT_ROOT}" "${APP_DIR}" 2>/dev/null || true)"
+    if [ -z "${out}" ]; then
+        printf 'skip\n%s\n' "ensure-kernel.sh 执行失败 —— 保守不动内核"
+        return 0
+    fi
+    printf '%s\n' "${out}"
+}
+
+ensure_hermes_agent_background() {
+    # 版本锚点（唯一真源 = ensure-kernel.sh，本文件不重抄版本正则）
+    ALIGN_KERNEL_VAL="0"
+    TARGET_AGENT_VER_VAL=""
+    INSTALLED_AGENT_VER_VAL=""
+    local _ke
+    _ke="$(resolve_kernel_ensure || true)"
+    if [ -n "${_ke}" ]; then
+        TARGET_AGENT_VER_VAL="$(bash "${_ke}" bundled "${APP_DIR}" 2>/dev/null || true)"
+        INSTALLED_AGENT_VER_VAL="$(bash "${_ke}" installed "${HERMES_AGENT_ROOT}" 2>/dev/null || true)"
+    fi
+
+    if [ -x "${HERMES_AGENT_ROOT}/venv/bin/hermes" ]; then
+        # 已装内核也要过版本闸门：装新 fpk 必须把内核带到本包内嵌的版本
+        # （旧行为是无条件 return，导致升级 fpk 永远不碰内核）。
+        local _dec_out _dec _why
+        _dec_out="$(kernel_decide)"
+        _dec="$(printf '%s\n' "${_dec_out}" | head -1)"
+        _why="$(printf '%s\n' "${_dec_out}" | sed -n '2p')"
+        if [ "${_dec}" != "upgrade" ]; then
+            log_msg "Hermes Agent already installed at ${HERMES_AGENT_ROOT} — kernel ${_dec:-skip}: ${_why:-无判定}"
+            return 0
+        fi
+        log_msg "Kernel behind bundled version: ${_why}"
+        log_msg ">>> Aligning kernel from bundled source (keep venv; backup + rollback on failure) ..."
+        ALIGN_KERNEL_VAL="1"
     fi
 
     # 如果之前后台安装标记为失败，清理后重试
@@ -437,12 +489,34 @@ LOG_FILE="${HERMES_HOME}/install-agent.log"
 MARKER="${HERMES_HOME}/.install-agent.marker"
 PID_FILE="${HERMES_HOME}/.install-agent.pid"
 APP_USER="${TRIM_USERNAME:-hermes-studio}"
+ALIGN_KERNEL="${ALIGN_KERNEL_VAL}"
+TARGET_AGENT_VER="${TARGET_AGENT_VER_VAL}"
+INSTALLED_AGENT_VER="${INSTALLED_AGENT_VER_VAL}"
+AGENT_BACKUP=""
 
 fail() {
     echo "ERROR: \$1" | tee -a "\${LOG_FILE}" >&2
     echo "failed" > "\${MARKER}"
     rm -f "\${PID_FILE}"
     exit 1
+}
+
+# 内核对齐失败时回滚：把备份树搬回原位，写 marker=rolled-back。
+# ⚠️ 不写 "failed"：cmd/main 见 failed 会 rm -rf 内核目录重装，那会把刚恢复的
+#    可用内核又删掉。"rolled-back" 只表示本次对齐没成，下次 main start 照常用旧内核。
+rollback_or_fail() {
+    if [ -n "\${AGENT_BACKUP}" ] && [ -d "\${AGENT_BACKUP}" ]; then
+        echo "ERROR: \$1 → 回滚内核到 \${AGENT_BACKUP}" | tee -a "\${LOG_FILE}" >&2
+        rm -rf "\${AGENT_ROOT}" 2>/dev/null || true
+        if mv "\${AGENT_BACKUP}" "\${AGENT_ROOT}"; then
+            echo "rolled-back" > "\${MARKER}"
+            rm -f "\${PID_FILE}"
+            echo "内核已回滚（\${INSTALLED_AGENT_VER}），应用仍可用旧内核启动"
+            exit 1
+        fi
+        echo "FATAL: 回滚失败，内核目录异常，需人工介入（备份在 \${AGENT_BACKUP}）" | tee -a "\${LOG_FILE}" >&2
+    fi
+    fail "\$1"
 }
 
 rm -f "\${MARKER}"
@@ -453,7 +527,15 @@ rm -f "\${MARKER}"
     echo "OFFLINE_SRC_FLAG=\${OFFLINE_SRC_FLAG}"
 
     if [ ! -s "\${INSTALLER}" ]; then
-        fail "installer not found at \${INSTALLER}"
+        # /tmp 会被清理、NAS 重启后也会丢 —— 用随包的安装器自愈，让本脚本
+        # 任何时候（包括 cmd/main 的内核自愈路径）都能重跑。
+        if [ -s "\${APP_DIR}/config/bootstrap/hermes-agent-install.sh" ]; then
+            cp -a "\${APP_DIR}/config/bootstrap/hermes-agent-install.sh" "\${INSTALLER}" 2>/dev/null || true
+            echo "Installer restored from bundled copy: \${APP_DIR}/config/bootstrap/hermes-agent-install.sh"
+        fi
+    fi
+    if [ ! -s "\${INSTALLER}" ]; then
+        fail "installer not found at \${INSTALLER} and no bundled copy in \${APP_DIR}/config/bootstrap/"
     fi
 
     export HOME="\${HERMES_HOME}"
@@ -495,9 +577,14 @@ rm -f "\${MARKER}"
             echo "WARNING: background chown failed (non-fatal)" >&2
     fi
 
-    # 1) 确保目标目录可写。install.sh 不允许目标目录已存在且非 git 仓库，先清理。
-    # 注意：如果目录由 root 拥有，当前用户可能删不掉，这里尝试并记录。
-    if [ -d "\${AGENT_ROOT}" ]; then
+    # 1) 准备目标目录。
+    #   · 对齐模式：旧内核整体【移到备份】而非删除 —— 校验不过要能回滚。
+    #   · 全新安装：install.sh 不允许目标目录已存在且非 git 仓库，先清理。
+    if [ "\${ALIGN_KERNEL}" = "1" ] && [ -x "\${AGENT_ROOT}/venv/bin/hermes" ]; then
+        AGENT_BACKUP="\${AGENT_ROOT}.prealign-\$(date +%s)"
+        echo ">>> Kernel align \${INSTALLED_AGENT_VER} -> \${TARGET_AGENT_VER}: backup to \${AGENT_BACKUP}"
+        mv "\${AGENT_ROOT}" "\${AGENT_BACKUP}" || fail "cannot move existing kernel to \${AGENT_BACKUP}"
+    elif [ -d "\${AGENT_ROOT}" ]; then
         rm -rf "\${AGENT_ROOT}" 2>/dev/null || { echo "WARNING: cannot remove old \${AGENT_ROOT}, trying chown ..."; chown -R "\${APP_USER}:\${APP_USER}" "\${AGENT_ROOT}" 2>/dev/null || true; rm -rf "\${AGENT_ROOT}" 2>/dev/null || true; }
     fi
 
@@ -536,6 +623,15 @@ rm -f "\${MARKER}"
         echo "Bundled source ready, HERMES_OFFLINE_INSTALL=1"
     fi
 
+    # 2c) 对齐模式：把备份里的 venv 搬回来复用 —— 避免重下 Python 3.14 与全部依赖
+    #     （慢网/弱网下这是能否升级成功的关键）。install-stamp.json 故意不搬：
+    #     postinstall 会按本包锚点重写它，搬过来会让版本显示停在旧值。
+    if [ -n "\${AGENT_BACKUP}" ] && [ -d "\${AGENT_BACKUP}/venv" ]; then
+        echo ">>> Reusing existing Python venv from backup (offline; skips Python/deps re-download)"
+        rm -rf "\${AGENT_ROOT}/venv"
+        mv "\${AGENT_BACKUP}/venv" "\${AGENT_ROOT}/venv" || rollback_or_fail "cannot move venv from backup"
+    fi
+
     # 2b) 若 FPK 内嵌 agent 的 node_modules（browser tools + TUI），直接复制并跳过
     #     后台 npm install。官方 installer 默认 NODE_DEPS_TIMEOUT=600s，NAS 慢网会卡
     #     很久；node_modules 已离线装好，复制后把超时压到 1s 让 npm 步骤直接跳过。
@@ -555,11 +651,20 @@ rm -f "\${MARKER}"
     fi
 
     # 3) 运行官方 install.sh
-    echo ">>> Running Hermes Agent installer ..."
-    if ! bash "\${INSTALLER}" --non-interactive --skip-setup \\
+    #    对齐模式：venv 已复用 → --no-venv 跳过重建；并【显式导出 VIRTUAL_ENV】——
+    #    install.sh 只在 USE_VENV=true 时导出它（其 1474 行），而 uv pip install
+    #    必须有目标环境，否则依赖会装到系统解释器上（污染系统且内核仍缺依赖）。
+    INSTALL_ARGS="--non-interactive --skip-setup"
+    if [ "\${ALIGN_KERNEL}" = "1" ]; then
+        INSTALL_ARGS="\${INSTALL_ARGS} --no-venv"
+        export VIRTUAL_ENV="\${AGENT_ROOT}/venv"
+        export UV_PYTHON="\${AGENT_ROOT}/venv/bin/python"
+    fi
+    echo ">>> Running Hermes Agent installer (args: \${INSTALL_ARGS}) ..."
+    if ! bash "\${INSTALLER}" \${INSTALL_ARGS} \\
             --dir "\${AGENT_ROOT}" \\
             --hermes-home "\${HERMES_HOME}"; then
-        fail "Hermes Agent installer exited with \$?"
+        rollback_or_fail "Hermes Agent installer exited with \$?"
     fi
 
     # 4) 校验 hermes 命令
@@ -573,7 +678,7 @@ rm -f "\${MARKER}"
     #     无法归因。stamp 缺失只降级版本显示（脚本内部容错），不阻断安装。
     echo ">>> Verifying kernel integrity (python>=3.14 / core deps / install-stamp) ..."
     if ! bash "\${APP_DIR}/config/bootstrap/hermes-agent-postinstall.sh" "\${AGENT_ROOT}" "\${APP_DIR}"; then
-        fail "post-install kernel verification failed (see log above)"
+        rollback_or_fail "post-install kernel verification failed (see log above)"
     fi
 
     # 5) 确保应用用户能读写 Agent 与 HOME 目录（后台脚本可能以 root 运行）
@@ -584,6 +689,19 @@ rm -f "\${MARKER}"
         echo "WARNING: chmod agent failed (non-fatal)" >&2
     chmod -R u+rwX "\${HERMES_HOME}" 2>/dev/null || \
         echo "WARNING: chmod hermes-home failed (non-fatal)" >&2
+
+    # 6) 记录「本内核由 fpk 装到哪个版本」——ensure-kernel.sh 判定的回退源之一
+    #    （首选仍是 hermes --version，它能反映用户自己跑的 hermes update）。
+    if [ -n "\${TARGET_AGENT_VER}" ]; then
+        printf '%s\n' "\${TARGET_AGENT_VER}" > "\${AGENT_ROOT}/.fpk-kernel-version" 2>/dev/null || \
+            echo "WARNING: 写 .fpk-kernel-version 失败（非致命）" >&2
+    fi
+    # 7) 对齐成功 → 清理备份（失败路径已在 rollback_or_fail 里搬回去了）
+    if [ -n "\${AGENT_BACKUP}" ] && [ -d "\${AGENT_BACKUP}" ]; then
+        echo ">>> Kernel align succeeded; removing backup \${AGENT_BACKUP}"
+        rm -rf "\${AGENT_BACKUP}" 2>/dev/null || \
+            echo "WARNING: 备份清理失败（不影响运行）：\${AGENT_BACKUP}" >&2
+    fi
 
     echo "=== Hermes Agent background install finished at \$(date '+%Y-%m-%d %H:%M:%S') ==="
 } >> "\${LOG_FILE}" 2>&1

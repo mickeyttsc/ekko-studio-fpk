@@ -112,6 +112,35 @@ if ! grep -qE '^config/privilege$' "$TMP/inner.list"; then
 fi
 echo "✅ 内层含 config/privilege"
 
+# ── 内核对齐（装新 fpk 必须把内核带到本包内嵌版本）──
+# 2026-10-15 用户实测暴露：旧行为是 install_callback 见 venv/bin/hermes 就 return，
+# 升级 fpk 永远不碰内核。现在靠 ensure-kernel.sh 判定 + install_callback 对齐，
+# 下面三条断言把「闸门随包 / 升级路径接线 / 失败可回滚」钉成构建门禁 ——
+# 任何一处被删或改回去，构建即红（避免再次出现「注释说会做、代码没做」）。
+if ! grep -qE '^config/bootstrap/ensure-kernel\.sh$' "$TMP/inner.list"; then
+    echo "::error:: 内层缺 config/bootstrap/ensure-kernel.sh —— 内核版本闸门没随包，装新 fpk 不会更新内核"
+    exit 1
+fi
+echo "✅ 内层含 config/bootstrap/ensure-kernel.sh（内核版本闸门）"
+
+IC="$(grep -vE '^[[:space:]]*#' "$TMP/cmd/install_callback" || true)"
+for need in 'ensure-kernel.sh' 'prealign' 'rolled-back' '--no-venv' 'rollback_or_fail'; do
+    if ! printf '%s' "$IC" | grep -qF "$need"; then
+        echo "::error:: cmd/install_callback 缺少内核对齐要素: $need（缺了会导致升级不更新内核，或对齐失败后无法回滚）"
+        exit 1
+    fi
+done
+echo "✅ cmd/install_callback 含内核对齐（闸门/备份/回滚/复用 venv）"
+
+UC="$(grep -vE '^[[:space:]]*#' "$TMP/cmd/upgrade_callback" || true)"
+for need in 'ensure-kernel.sh' 'decide' 'run_install_callback'; do
+    if ! printf '%s' "$UC" | grep -qF "$need"; then
+        echo "::error:: cmd/upgrade_callback 未接内核对齐: 缺 $need（web-ui 版本相同时内核仍不会更新）"
+        exit 1
+    fi
+done
+echo "✅ cmd/upgrade_callback 已接内核对齐（升级路径可达）"
+
 # 桌面入口必须是 ${wizard_port}（端口可配）而不是写死值：
 # 写死会让「应用设置里改端口」失效 —— 入口跟着变、服务还在老端口，页面打不开。
 if ! grep -qE '^ui/config$' "$TMP/inner.list"; then

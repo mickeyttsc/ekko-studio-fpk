@@ -387,8 +387,11 @@ WD_EOF
 }
 
 # 内核更新通道自愈（幂等，每次 start 都跑）：
-# FPK 升级【不会】覆盖已装内核 —— install_callback 见 venv/bin/hermes 存在就 return，
+# 历史：FPK 升级曾【不会】覆盖已装内核（install_callback 见 venv/bin/hermes 就 return），
 # 所以老装机即使装了新 FPK，内核仍是旧 bundle 形态（master 分支、无 remote）。
+# 2026-10-15 起改为版本闸门：install_callback / upgrade_callback 调 ensure-kernel.sh
+# 判定，包内锚点更新时对齐内核（复用 venv + 备份回滚），见 MAINTAINING #36。
+# 但【存量装机】的内核仍是旧形态（无 remote / 停在 master），故下面这段自愈照旧保留。
 # 缺 remote → `hermes update` 报 "fatal: 'origin' does not appear to be a git repository"；
 # 停在 master → update 目标 main，触发 parked-branch 守卫直接跳过；
 # filemode 未关 → fnOS chmod -R 755 把全树打成 dirty，每次 update 要 stash 上万条假改动。

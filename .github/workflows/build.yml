@@ -239,6 +239,14 @@ jobs:
           set -euo pipefail
           python3 scripts/detect-upstream.py selftest
 
+      # ── 内核版本闸门回归自检（fail-closed）──
+      # 保证「装新 fpk 会把内核带到本包内嵌版本」这条判定在打包前就是可执行的：
+      # fresh/upgrade/skip/防降级/日期式不可比/标记回退，任一用例不符即中断构建。
+      - name: Kernel gate selftest
+        run: |
+          set -euo pipefail
+          bash scripts/ensure-kernel-selftest.sh
+
       # ── Hermes Agent 离线源码包 ──
       # 官方 install.sh 默认 git clone NousResearch/hermes-agent。大量 NAS 无法
       # 稳定连接 GitHub，导致安装后 Agent 启动不了。CI 在 GitHub 内网下载源码并
