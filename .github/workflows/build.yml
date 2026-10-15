@@ -171,7 +171,9 @@ jobs:
           #    Connect 建立端口上游；缺失时进程里 TRIM_SERVICE_PORT 为空，桌面
           #    小窗在 Connect 模式下没有上游 → 浏览器 ERR_CONNECTION_REFUSED
           #    （2026-10-15 用户实测：manifest 无 service_port 的包打不开）。
-          SP="$(get service_port)"
+          # ⚠️ 每个 step 是独立 shell：上一 step 里定义的 get() 在这里不存在
+          #    （曾因此报 `get: command not found` → exit 127，run#9 构建红）。
+          SP="$(grep -E '^service_port[[:space:]]*=' manifest | head -1 | cut -d= -f2 | tr -d '[:space:]')"
           if [ -z "$SP" ]; then
             echo "::error:: manifest 缺 service_port —— fnOS Connect（远程访问）没有端口上游，桌面小窗打不开"
             exit 1
