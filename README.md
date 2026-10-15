@@ -32,6 +32,12 @@
 - 下载：见 [Releases](https://github.com/mickeyttsc/ekko-studio-fpk/releases) 页附件（`fnos-ekko-studio_v<版本>.fpk`）
 - 安装：飞牛应用中心 → 手动安装 → 选择 fpk。
 
+## 使用说明
+
+- 装后打开：`http://<NAS-IP>:8648`（fnOS 桌面小窗同样可用；端口可在「应用设置」修改）。
+- 首次安装走安装向导，配置项走配置向导；WebSocket / 反代 / IPv6 开箱即用。
+- 升级保留配置与会话；卸载时三档清理可选（保留 / 只删运行环境 / 完全删除）。
+
 ## 维护
 
 构建链路、目录结构、门禁与历史坑位：[MAINTAINING.md](MAINTAINING.md)
