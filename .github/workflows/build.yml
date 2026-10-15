@@ -166,7 +166,27 @@ jobs:
                    distributor distributor_url desktop_uidir desktop_applaunchname; do
             grep -qE "^${f}[[:space:]]*=" manifest || { echo "::error:: manifest 缺必需字段: $f"; exit 1; }
           done
-          echo "✅ manifest 字段完整且无重复"
+          # ── 远程访问（fnOS Connect）链路必需的两个字段约束 ──
+          # ① service_port 必须声明：系统据此注入 TRIM_SERVICE_PORT，并据此为
+          #    Connect 建立端口上游；缺失时进程里 TRIM_SERVICE_PORT 为空，桌面
+          #    小窗在 Connect 模式下没有上游 → 浏览器 ERR_CONNECTION_REFUSED
+          #    （2026-10-15 用户实测：manifest 无 service_port 的包打不开）。
+          SP="$(get service_port)"
+          if [ -z "$SP" ]; then
+            echo "::error:: manifest 缺 service_port —— fnOS Connect（远程访问）没有端口上游，桌面小窗打不开"
+            exit 1
+          fi
+          case "$SP" in
+            ''|*[!0-9]*) echo "::error:: manifest service_port 非数字: '$SP'"; exit 1 ;;
+          esac
+          # ② 不得声明 micro_app=true：该标记属于「经统一网关按路径服务」的微应用
+          #    （fygo-browser 那种 service_port=0 + gatewaySocket 形态）。我们是
+          #    端口型入口，带该标记会让桌面按微应用路由访问 → 同样打不开。
+          if grep -qE "^micro_app[[:space:]]*=[[:space:]]*true" manifest; then
+            echo "::error:: manifest 声明了 micro_app=true，但本应用是端口型入口（ui/config 声明 port）—— 远程访问会走错路由，构建中止"
+            exit 1
+          fi
+          echo "✅ manifest 字段完整且无重复（service_port=$SP，未声明 micro_app）"
 
       - name: Set timezone
         run: sudo timedatectl set-timezone "Asia/Shanghai"

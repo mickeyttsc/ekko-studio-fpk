@@ -172,6 +172,32 @@ if ! grep -q '\${wizard_port}' "$TMP/ui/config"; then
 fi
 echo "✅ ui/config 端口使用 \${wizard_port}（可在应用设置中修改）"
 
+# ── 远程访问（fnOS Connect）链路：manifest 必须声明 service_port 且不得声明 micro_app ──
+# ① service_port：系统据此注入 TRIM_SERVICE_PORT，并据此为 Connect 建立端口上游。
+#    缺它 → 进程里 TRIM_SERVICE_PORT 为空、Connect 无上游 → 桌面小窗在 Connect
+#    模式下浏览器直接 ERR_CONNECTION_REFUSED（2026-10-15 用户实测）。
+# ② micro_app=true：属于「经统一网关按路径服务」的微应用形态（service_port=0 +
+#    gatewaySocket + url=/app/<name>，如 fygo-browser）。本应用是端口型入口，
+#    带该标记会让桌面按微应用路由去访问 → 同样打不开。
+tar xzf "$FPK" manifest -C "$TMP" 2>/dev/null || true
+if [ ! -f "$TMP/manifest" ]; then
+    echo "::error:: 外层缺 manifest，无法校验远程访问字段"
+    exit 1
+fi
+SP="$(grep -E '^service_port[[:space:]]*=' "$TMP/manifest" | head -1 | cut -d= -f2 | tr -d '[:space:]')"
+if [ -z "$SP" ]; then
+    echo "::error:: 产物 manifest 缺 service_port —— fnOS Connect（远程访问）没有端口上游，桌面小窗打不开"
+    exit 1
+fi
+case "$SP" in
+    ''|*[!0-9]*) echo "::error:: 产物 manifest service_port 非数字: '$SP'"; exit 1 ;;
+esac
+if grep -qE '^micro_app[[:space:]]*=[[:space:]]*true' "$TMP/manifest"; then
+    echo "::error:: 产物 manifest 声明了 micro_app=true，但入口是端口型（ui/config 有 port）—— 远程访问会走错路由"
+    exit 1
+fi
+echo "✅ 产物 manifest 声明 service_port=$SP 且未声明 micro_app（远程访问链路可用）"
+
 # ui/config 的 protocol 必须是非空 http/https：
 # 留空会让 fnOS 渲染出入口 url = "://${host}:<port>/"（协议头缺失），
 # 客户端只能自己猜协议 —— 猜成 HTTPS 就会用 TLS 打明文 HTTP 端口，
