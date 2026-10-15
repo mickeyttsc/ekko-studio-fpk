@@ -326,6 +326,39 @@ if ! grep -qE '^bin/patch-frame-headers\.js$' "$TMP/inner.list"; then
     exit 1
 fi
 echo "✅ iframe 补丁脚本随包（bin/patch-frame-headers.js）"
+# ②a 补丁脚本必须内置 fnOS 官方远程域（fnos.net / 5ddd.com / trzznas.com）——
+#     远程模式下桌面以这些域为父页面，缺了就被自家 CSP 拦成「拒绝连接」
+#     （2026-10-15 用户实测：远程小窗打不开的真根因）。
+for need in 'fnos.net' '*.fnos.net' '5ddd.com' 'trzznas.com'; do
+    if ! grep -qF -- "$need" "$TMP/bin/patch-frame-headers.js" 2>/dev/null; then
+        tar xzf "$TMP/app.tgz" -C "$TMP" bin/patch-frame-headers.js 2>/dev/null || true
+        if ! grep -qF -- "$need" "$TMP/bin/patch-frame-headers.js" 2>/dev/null; then
+            echo "::error:: patch-frame-headers.js 缺 fnOS 官方远程域 '$need' —— 远程访问小窗会被自家 CSP 拦成「拒绝连接」"
+            exit 1
+        fi
+    fi
+done
+echo "✅ 补丁脚本内置 fnOS 官方远程域（fnos.net/5ddd.com/trzznas.com）"
+# ②a2 出厂产物（bundled dist）也必须已经带上这些域：构建期用 --static-only 打的是
+#      静态表，官方域属于静态表 —— 产物里没有就说明构建期补丁没跑或被打回。
+BUNDLED=""
+for cand in "node/lib/node_modules/hermes-web-ui/dist/server/index.js" \
+            "app/node/lib/node_modules/hermes-web-ui/dist/server/index.js"; do
+    if grep -qxF "$cand" "$TMP/inner.list" 2>/dev/null; then BUNDLED="$cand"; break; fi
+done
+if [ -z "$BUNDLED" ]; then
+    BUNDLED="$(grep -E 'hermes-web-ui/dist/server/index\.js$' "$TMP/inner.list" | head -1 || true)"
+fi
+if [ -z "$BUNDLED" ]; then
+    echo "::error:: 内层找不到 hermes-web-ui 的 dist/server/index.js —— 无法校验出厂 iframe 白名单"
+    exit 1
+fi
+tar xzf "$TMP/app.tgz" -C "$TMP" "$BUNDLED" 2>/dev/null || true
+if ! grep -q 'https://\*\.fnos\.net:\*' "$TMP/$BUNDLED" 2>/dev/null; then
+    echo "::error:: 出厂 dist 未含 https://*.fnos.net:*（构建期 --static-only 补丁没打上/被回退）—— 远程小窗会「拒绝连接」"
+    exit 1
+fi
+echo "✅ 出厂 dist 已含 fnOS 官方远程域（远程小窗不再被自家 CSP 拦）"
 # ②b 随包的脚本必须是「动态枚举 + 可刷新」那一版 —— 用内容特征断言，fail-closed。
 # ⛔ 事故（2026-10-14）：scripts/ 升级成动态白名单后忘了同步 app/bin/ 的副本，
 #    运行时自愈变成 no-op（日志 "already patched, no change"）→ 白名单里留着
