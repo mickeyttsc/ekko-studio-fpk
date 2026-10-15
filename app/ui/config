@@ -16,7 +16,7 @@
         "hermes-studio.direct": {
             "title": "Ekko Studio 直连",
             "icon": "images/icon_{0}.png",
-            "type": "url",
+            "type": "iframe",
             "protocol": "http",
             "port": "${wizard_port}",
             "url": "/",
