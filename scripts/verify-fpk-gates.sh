@@ -204,6 +204,12 @@ echo "✅ 产物 manifest 声明 service_port=$SP 且未声明 micro_app（远�
 # 手机 App 报 HandshakeException: WRONG_VERSION_NUMBER(tls_record.cc:127)。
 # 官方第三方应用（Lucky/1Panel/Sun-Panel/Home-Assistant/lemon-music/miair-next）
 # 凡指定了 port 的一律显式写 "http"；protocol 为空只出现在「无 port、走路径路由」的应用上。
+# ⚠️ 规则按入口类型区分（2026-10-15 起两入口并存）：
+#   · 带 port 的入口（端口直连）→ protocol 必须显式 http/https：留空会让入口 url
+#     变成 "://host:port/"，客户端猜成 HTTPS 打明文端口（手机 App 报
+#     HandshakeException: WRONG_VERSION_NUMBER）。
+#   · 不带 port 的路径型入口（统一网关 gatewaySocket/gatewayPrefix）→ protocol
+#     允许留空（"" = 自适应），因为它是跟着桌面/浏览器当前协议走的同源路径。
 if ! python3 - "$TMP/ui/config" <<'PY'
 import json, sys
 try:
@@ -214,20 +220,70 @@ urls = cfg.get('.url') or {}
 if not urls:
     print("ui/config 缺 .url 段", file=sys.stderr); sys.exit(1)
 for name, item in urls.items():
-    proto = (item or {}).get('protocol')
-    if proto not in ('http', 'https'):
-        print(f"{name}: protocol={proto!r}（必须显式写 'http' 或 'https'）", file=sys.stderr)
-        sys.exit(1)
-    # 指定了 port 却不带协议头 = 客户端必然猜错协议
-    if (item or {}).get('port') and proto not in ('http', 'https'):
-        sys.exit(1)
+    item = item or {}
+    if item.get('port'):
+        proto = item.get('protocol')
+        if proto not in ('http', 'https'):
+            print(f"{name}: 带 port 的入口 protocol={proto!r}（必须显式写 'http' 或 'https'）", file=sys.stderr)
+            sys.exit(1)
 sys.exit(0)
 PY
 then
-    echo "::error:: ui/config 的 protocol 必须显式写 'http'（留空会导致入口 url 变成 ://host:port/ ，客户端猜成 HTTPS 打明文端口）"
+    echo "::error:: ui/config 带 port 的入口必须显式写 protocol=http（留空会被客户端猜成 HTTPS 打明文端口）"
     exit 1
 fi
-echo "✅ ui/config protocol 显式声明（入口 url 协议头完整）"
+echo "✅ ui/config protocol 规则正确（带 port 的入口显式 http；路径型入口允许自适应）"
+
+# ── 远程访问（fnOS Connect）入口：统一网关路径型，必须随包且接线 ──
+# 2026-10-15 用户实测：端口型入口在 Connect（远程访问）下走
+# https://<app>.<域名> 子域路由，本机不可达（浏览器 ERR_CONNECTION_REFUSED）；
+# 而已验证可远程的第三方应用（wild-work）用的是「统一网关 + 路径型入口 + 本地
+# unix socket 桥」。本应用采用同一形态：主入口走 /app/hermes-studio，
+# 由 cmd/main 启动 gw-bridge.mjs 把该 socket 桥到 127.0.0.1:<PORT>。
+if ! python3 - "$TMP/ui/config" <<'PY'
+import json, sys
+cfg = json.load(open(sys.argv[1], encoding='utf-8'))
+urls = cfg.get('.url') or {}
+main = urls.get('hermes-studio.Application') or {}
+if main.get('gatewaySocket') != 'app.sock':
+    print(f"主入口 gatewaySocket={main.get('gatewaySocket')!r}（应为 'app.sock'：远程访问入口靠它接系统网关）", file=sys.stderr); sys.exit(1)
+if main.get('gatewayPrefix') != '/app/hermes-studio':
+    print(f"主入口 gatewayPrefix={main.get('gatewayPrefix')!r}（应为 '/app/hermes-studio'）", file=sys.stderr); sys.exit(1)
+if main.get('port'):
+    print("主入口同时声明了 port，会退回子域路由（远程不可达）", file=sys.stderr); sys.exit(1)
+if (main.get('url') or '') != '/app/hermes-studio':
+    print(f"主入口 url={main.get('url')!r}（应等于 gatewayPrefix）", file=sys.stderr); sys.exit(1)
+if not any((it or {}).get('port') for it in urls.values()):
+    print("缺少带 port 的端口直连入口（局域网备用入口）", file=sys.stderr); sys.exit(1)
+sys.exit(0)
+PY
+then
+    echo "::error:: ui/config 的远程访问入口不合规（统一网关 gatewaySocket/gatewayPrefix 缺失或与 port 混用）—— 构建中止"
+    exit 1
+fi
+echo "✅ 远程访问入口 = 统一网关路径型（/app/hermes-studio → app.sock），并保留端口直连入口"
+
+# 网关桥脚本必须随包，且 cmd/main 必须启动/停止它（定义了不调用 = 远程入口空转）
+if ! grep -qE '^bin/gw-bridge\.mjs$' "$TMP/inner.list"; then
+    echo "::error:: 内层缺 bin/gw-bridge.mjs —— 统一网关 socket 无人桥接，远程访问入口必打不开"
+    exit 1
+fi
+for need in 'gw-bridge.mjs' '/app/hermes-studio'; do
+    if ! grep -qF -- "$need" "$TMP/main.code"; then
+        echo "::error:: cmd/main 缺网关桥要素: $need（缺了 = 远程访问入口没人拉起/没人清理）"
+        exit 1
+    fi
+done
+# 定义 ≠ 调用：只查字符串存在时，`foo() {` 这行也算命中（干跑变异实测漏拦）。
+# 两条都要「定义 + 调用」各出现 ≥1 次才放行 —— 与 iframe 补丁门禁同款判据。
+for fn in start_gateway_bridge stop_gateway_bridge; do
+    n="$(grep -cE "(^|[^_a-zA-Z])${fn}([^_a-zA-Z]|$)" "$TMP/main.code" || true)"
+    if [ "${n:-0}" -lt 2 ]; then
+        echo "::error:: cmd/main 的 ${fn} 出现 ${n:-0} 次（应 ≥2：定义 + 调用）—— 远程访问入口会空转（起了没人停 / 定义了没人起）"
+        exit 1
+    fi
+done
+echo "✅ 网关桥脚本随包且已在 cmd/main 接线（启动/停止均为「定义+调用」）"
 
 # 桌面入口必须是 iframe（小窗模式）：type=url 会跳新浏览器标签页，
 # 用户明确要求点击图标在 fnOS 桌面窗口内嵌打开（2026-10-14 拍板）。
