@@ -47,6 +47,14 @@ const origins = new Set([
   'http://localhost:*', 'https://localhost:*',
   'http://127.0.0.1:*', 'https://127.0.0.1:*',
   'http://[::1]:*', 'https://[::1]:*',
+  // fnOS 官方远程访问域（Connect / 手机 App 的桌面地址就是 https://<fnid>.fnos.net）。
+  // 它们是【产品常量】——与打包者/使用者无关，故进静态表（既不泄露隐私，也让所有
+  // 使用者开箱即用）。⛔ 缺了它们时：远程模式下桌面以 fnos.net 为父页面嵌入本应用，
+  // 而本应用自己的 CSP frame-ancestors 不认这个父来源 → 浏览器在框里显示
+  // 「<app>.fnos.net 拒绝连接」（2026-10-15 用户实测的远程小窗打不开根因）。
+  'https://fnos.net:*', 'https://*.fnos.net:*', 'http://*.fnos.net:*',
+  'https://5ddd.com:*', 'https://*.5ddd.com:*', 'http://*.5ddd.com:*',
+  'https://trzznas.com:*', 'https://*.trzznas.com:*', 'http://*.trzznas.com:*',
 ]);
 
 // 额外来源（使用者本地的域名等）：校验形态，拒绝引号/分号/空白以免破坏 CSP
