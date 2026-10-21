@@ -188,5 +188,56 @@ check_assert "期望缺失→SKIP" "SKIP" 0 "${D}/agent" ""
 D="${TMP}/assert-nostamp"; mk_display_stub "${D}/agent" "0.0.0"
 check_assert "界面 0.0.0（判死）" "MISMATCH" 1 "${D}/agent" "0.22.1"
 
+# check_rewrite <名称> <期望第1行> <期望退出码> <agent 目录> <期望版本>
+check_rewrite() {
+    local name="$1" expect_state="$2" expect_rc="$3" dir="$4" want="$5" out state rc
+    out="$(bash "${HELPER}" assert-rewrite "${dir}" "${want}" 2>/dev/null)"
+    rc=$?
+    state="$(printf '%s\n' "${out}" | head -1)"
+    if [ "${state}" = "${expect_state}" ] && [ "${rc}" = "${expect_rc}" ]; then
+        printf '  ✅ %-28s → %s (rc=%s)\n' "${name}" "${state}" "${rc}"
+        PASS=$((PASS + 1))
+    else
+        printf '  ❌ %-28s → 期望 %s/rc=%s，实得 %s/rc=%s\n' "${name}" "${expect_state}" "${expect_rc}" "${state}" "${rc}"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+# ── 自愈版本（内核自己重写 stamp 时会算出的 baseVersion）──────────────────────
+# 这是 2026-10-21 事故的直接回归用例：install-stamp 写对了（第 13 条 OK），
+# 但打包树没有可达 tag，内核后台重写 stamp 时算出 unknown → 界面 0.0.0。
+# 所以「重写后会算什么」必须与「此刻显示什么」分开断言。
+
+# 18) 重写值 == 锚点 → OK/0（装机后的正常态）
+D="${TMP}/rw-ok"; mk_display_stub "${D}/agent" "0.22.1"
+check_rewrite "重写值==锚点" "OK" 0 "${D}/agent" "0.22.1"
+
+# 19) 重写值 unknown（无可达 tag 的打包树）→ MISMATCH/1 —— 事故形态
+D="${TMP}/rw-unknown"; mk_display_stub "${D}/agent" "unknown"
+check_rewrite "重写值 unknown（判死）" "MISMATCH" 1 "${D}/agent" "0.22.1"
+
+# 20) 重写值与锚点不同（tag 打错位置）→ MISMATCH/1
+D="${TMP}/rw-wrong"; mk_display_stub "${D}/agent" "0.22.0"
+check_rewrite "重写值!=锚点（判死）" "MISMATCH" 1 "${D}/agent" "0.22.1"
+
+# 21) 探针不可用（无 venv python）→ SKIP/0，不因辅助信息缺失把安装判死
+D="${TMP}/rw-none"; mk_display_stub "${D}/agent" ""
+check_rewrite "探针不可用→SKIP" "SKIP" 0 "${D}/agent" "0.22.1"
+
+# 22) 期望缺失/非语义化 → SKIP/0
+D="${TMP}/rw-skip"; mk_display_stub "${D}/agent" "0.22.1"
+check_rewrite "期望缺失→SKIP" "SKIP" 0 "${D}/agent" "main"
+
+# 23) rewrite-ver 直取：桩输出即内核自愈值
+D="${TMP}/rw-raw"; mk_display_stub "${D}/agent" "0.22.1"
+got="$(bash "${HELPER}" rewrite-ver "${D}/agent" 2>/dev/null)"
+if [ "${got}" = "0.22.1" ]; then
+    printf '  ✅ %-28s → %s\n' "rewrite-ver 直取" "${got}"
+    PASS=$((PASS + 1))
+else
+    printf '  ❌ %-28s → 期望 0.22.1，实得 "%s"\n' "rewrite-ver 直取" "${got}"
+    FAIL=$((FAIL + 1))
+fi
+
 echo "内核版本闸门自检：通过 ${PASS} / 失败 ${FAIL}"
 [ "${FAIL}" -eq 0 ] || exit 1

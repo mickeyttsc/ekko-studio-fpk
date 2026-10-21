@@ -159,6 +159,75 @@ for need in 'ensure-kernel.sh' 'decide' 'run_install_callback'; do
 done
 echo "✅ cmd/upgrade_callback 已接内核对齐（升级路径可达）"
 
+# ── 版本自愈门禁（2026-10-21 事故：装完 3 分钟界面回退 0.0.0）───────────────
+# 因果链：Studio 版本栏读 install-stamp.json 的 baseVersion；postinstall 装完写对
+# 之后，内核还会用 write_source_stamp() 再重写一次，而它靠
+# git tag --merged HEAD 推 base_version。打包树（tarball + git init 单提交）
+# 没有可达 tag → 重写落成 unknown → 界面 0.0.0。实测：postinstall 写完
+# 0.22.3 并通过了原有 assert-displayed，3 分钟后被后台 source_completion 洗掉。
+# 三条缺一不可：自愈口径随包 / 装机按锚点打 tag / 装后断言自愈值。
+tar xzf "$TMP/app.tgz" -C "$TMP" config/bootstrap/ensure-kernel.sh \
+    config/bootstrap/hermes-agent-postinstall.sh 2>/dev/null || true
+if [ ! -f "$TMP/config/bootstrap/ensure-kernel.sh" ] \
+   || [ ! -f "$TMP/config/bootstrap/hermes-agent-postinstall.sh" ]; then
+    echo "::error:: 解包 ensure-kernel.sh / postinstall 失败，无法校验版本自愈链路（构建中止）"
+    exit 1
+fi
+grep -vE '^[[:space:]]*#' "$TMP/config/bootstrap/ensure-kernel.sh" > "$TMP/ek.txt" || true
+for need in 'rewrite-ver' 'assert-rewrite' '_git_version_info'; do
+    if ! grep -qF -- "$need" "$TMP/ek.txt"; then
+        echo "::error:: ensure-kernel.sh 缺版本自愈口径: $need（装后内核重写 stamp 会算出 unknown，界面回退 0.0.0）"
+        exit 1
+    fi
+done
+if ! grep -qF -- 'git tag -f' "$TMP/ic.txt"; then
+    echo "::error:: cmd/install_callback 装机未按锚点打版本 tag —— 内核自愈重写 stamp 必然算出 unknown，界面回退 0.0.0"
+    exit 1
+fi
+grep -vE '^[[:space:]]*#' "$TMP/config/bootstrap/hermes-agent-postinstall.sh" > "$TMP/po.txt" || true
+if ! grep -qF -- 'assert-rewrite' "$TMP/po.txt"; then
+    echo "::error:: postinstall 未断言内核自愈版本 —— 「此刻显示对、装完被洗掉」无法在装机阶段拦下"
+    exit 1
+fi
+echo "✅ 版本自愈链路齐全（按锚点打 tag + 自愈口径 + 装后断言）"
+
+# 后台脚本 heredoc（cat > ... <<AGENT_EOF，未加引号）里的命令替换与反引号若未
+# 转义，会在【生成脚本的那一刻】于装机机求值；反引号更危险 —— 会真的执行里面的
+# 命令（实测注释里写 `hermes update` 就会被执行）。变量替换 ${VAR} 不在此列：
+# 既有多处故意依赖生成期取值（如 AGENT_ROOT="${HERMES_AGENT_ROOT}"）。
+if ! python3 - "$TMP/cmd/install_callback" <<'PYGATE'
+import re
+import sys
+from pathlib import Path
+
+lines = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace").splitlines()
+start = end = None
+for i, line in enumerate(lines, 1):
+    if 'cat > "${BG_SCRIPT}" <<AGENT_EOF' in line:
+        start = i
+    elif start and line.strip() == "AGENT_EOF":
+        end = i
+        break
+if not start or not end:
+    print("找不到后台脚本 heredoc 区间（install_callback 结构变了？）", file=sys.stderr)
+    raise SystemExit(1)
+bad = []
+for i in range(start, end - 1):
+    line = lines[i]
+    if re.search(r"(?<!\\)\$\(", line):
+        bad.append((i + 1, "未转义 $()（生成时执行）", line.strip()[:90]))
+    if re.search(r"(?<!\\)`", line):
+        bad.append((i + 1, "未转义反引号（生成时执行）", line.strip()[:90]))
+for line_no, kind, text in bad:
+    print(f"  {line_no}: {kind} | {text}", file=sys.stderr)
+raise SystemExit(1 if bad else 0)
+PYGATE
+then
+    echo "::error:: cmd/install_callback 的后台脚本 heredoc 里有生成期求值（未转义的 \$() 或反引号）—— 会在装机时于生成阶段执行"
+    exit 1
+fi
+echo "✅ 后台脚本 heredoc 无生成期求值"
+
 # 桌面入口必须是 ${wizard_port}（端口可配）而不是写死值：
 # 写死会让「应用设置里改端口」失效 —— 入口跟着变、服务还在老端口，页面打不开。
 #

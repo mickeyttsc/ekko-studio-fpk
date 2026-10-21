@@ -600,8 +600,8 @@ rm -f "\${MARKER}"
         # stamp，于是界面显示的不是本包锚点版本。本路径铺出来的树版本 = 本包锚点，
         # 故先删，让 postinstall 按锚点重写（写完还要实测断言，见其第 4 步）。
         rm -f "\${AGENT_ROOT}/install-stamp.json" 2>/dev/null || true
-        # 更新通道自愈（幂等）：装机后必须能 `hermes update`。
-        # ⛔ 不要锁进 `if [ ! -d .git ]` 分支 —— 那正是老 bug 的形态：
+        # 更新通道自愈（幂等）：装机后必须能执行 hermes update。
+        # ⛔ 不要锁进 if [ ! -d .git ] 分支 —— 那正是老 bug 的形态：
         #    bundle 自带 .git 时整段跳过，remote 永远补不上。
         # ⚠️ fnpack 打包会过滤隐藏目录，bundle 的 .git 不进包，
         #    所以这里「无 .git 也要 git init」。
@@ -619,8 +619,28 @@ rm -f "\${MARKER}"
         git config remote.origin.fetch '+refs/heads/main:refs/remotes/origin/main' 2>/dev/null || true
         git config core.filemode false 2>/dev/null || true
         git branch -m main >/dev/null 2>&1 || true
-        if [ "$(git rev-list --count HEAD 2>/dev/null || echo 0)" = "1" ] \
-           && [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" != "true" ]; then
+        # ── 版本身份锚点：界面版本 0.0.0 的根因修复（2026-10-21）──────────────
+        # Studio 版本栏只读 install-stamp.json 的 baseVersion；而装机后内核还会
+        # 自己重写这张 stamp（source_completion / post_update → write_source_stamp），
+        # 它用 git tag --merged HEAD --list 'v[0-9]*' 推 base_version。
+        # tarball + git init 出来的打包树没有任何可达 tag → base_version 落成
+        # "unknown" → 界面显示 0.0.0（postinstall 写得再对，装完几分钟就被洗掉）。
+        # 故装机时按本包锚点给 HEAD 打 tag，让之后每次自愈重写都能算对版本。
+        # 锚点非语义化（跟踪 main / 日期式 tag）时绝不打 —— 那是谎报版本，宁可
+        # 让 postinstall 走「无法解析→不写」的保守分支。
+        if printf '%s' "\${TARGET_AGENT_VER}" | grep -qE '^[0-9]{1,3}[.][0-9]{1,3}[.][0-9]{1,3}$'; then
+            if git tag -f "v\${TARGET_AGENT_VER}" HEAD >/dev/null 2>&1; then
+                echo "Version anchor: tag v\${TARGET_AGENT_VER} -> \$(git rev-parse --short HEAD)"
+            else
+                echo "WARNING: 打版本锚点 tag v\${TARGET_AGENT_VER} 失败（界面可能在装后回退 0.0.0）" >&2
+            fi
+        else
+            echo "Version anchor: 锚点 '\${TARGET_AGENT_VER}' 非语义化 —— 不打 tag（由 postinstall 保守处理）"
+        fi
+        # 单提交仓库标成 shallow，让 git 不再尝试走完整历史（生成脚本时就求值，
+        # 故这里必须转义，否则判定的是构建机而不是目标机）。
+        if [ "\$(git rev-list --count HEAD 2>/dev/null || echo 0)" = "1" ] \
+           && [ "\$(git rev-parse --is-shallow-repository 2>/dev/null)" != "true" ]; then
             git rev-parse HEAD > .git/shallow 2>/dev/null || true
         fi
         echo "Update channel: origin=\$(git remote get-url origin 2>/dev/null) branch=\$(git branch --show-current 2>/dev/null) shallow=\$(git rev-parse --is-shallow-repository 2>/dev/null)"

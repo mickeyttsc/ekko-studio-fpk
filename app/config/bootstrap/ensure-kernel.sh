@@ -149,11 +149,71 @@ assert_displayed() {
     return 1
 }
 
+# ── 自愈版本（内核自己重写 stamp 时会算出的 baseVersion）───────────────────────
+# 为什么需要独立于 displayed：Studio 版本栏读的是【当前】install-stamp.json，
+# 而装机后内核还会自己重写这张 stamp（source_completion / post_update →
+# write_source_stamp），它用 `git tag --merged HEAD --list 'v[0-9]*'` 推
+# base_version。打包树是 tarball + git init 的单提交仓库，没有可达 tag →
+# 重写结果落成 "unknown" → 界面回退 0.0.0（2026-10-21 事故：postinstall 写对
+# 0.22.3，装完 3 分钟被洗掉）。故「此刻显示的值」和「重写后会变成的值」必须
+# 分别断言：前者过了不代表后者不会回退。
+#
+# 探针直接 import 内核自己的 _git_version_info，不在这里重抄 tag 解析/取最大
+# 语义化版本的口径（重抄过就漏改过）。
+rewrite_ver() {
+    local root="${1:-}" py="" out=""
+    [ -n "${root}" ] || return 0
+    for py in "${root}/venv/bin/python3" "${root}/venv/bin/python"; do
+        [ -x "${py}" ] && break
+        py=""
+    done
+    [ -n "${py}" ] || return 0
+    out="$("${py}" - "${root}" <<'PYEOF' 2>/dev/null || true
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from hermes_cli.version_info import _git_version_info
+
+print(_git_version_info(Path(sys.argv[1]), include_untracked=True).base_version)
+PYEOF
+)"
+    printf '%s' "${out}" | tr -d '[:space:]'
+}
+
+# 期望值走 norm_ver；探针不可用时 SKIP/0（辅助信息缺失不把安装判死），
+# 探针可用但算出的值 != 期望 → MISMATCH/1（这是「装后必回退」的确定性证据）。
+assert_rewrite() {
+    local root="${1:-}" want got
+    want="$(norm_ver "${2:-}")"
+    got="$(rewrite_ver "${root}")"
+    if [ -z "${want}" ]; then
+        printf 'SKIP\n期望版本缺失或非语义化（自愈值=%s）—— 无法断言重写后的版本\n' "${got:-空}"
+        return 0
+    fi
+    if [ -z "${got}" ]; then
+        printf 'SKIP\n探测不到内核自愈版本（venv python 不可用）—— 退回只校验 stamp\n'
+        return 0
+    fi
+    if [ "${got}" = "${want}" ]; then
+        printf 'OK\n内核自愈算出 %s == 期望 %s（HEAD 有锚点 tag，重写 stamp 不会回退）\n' "${got}" "${want}"
+        return 0
+    fi
+    if [ "${got}" = "unknown" ]; then
+        printf 'MISMATCH\n内核自愈算出 unknown != 期望 %s（HEAD 缺可达的锚点 tag → 重写 stamp 会落成 unknown，界面回退 0.0.0）\n' "${want}"
+    else
+        printf 'MISMATCH\n内核自愈算出 %s != 期望 %s（HEAD 上可达的锚点 tag 与预期不符 → 重写 stamp 会写错版本）\n' "${got}" "${want}"
+    fi
+    return 1
+}
+
 case "${1:-}" in
     decide)           decide "${2:-}" "${3:-}" ;;
     installed)        installed_ver "${2:-}" ;;
     bundled)          bundled_ver "${2:-}" ;;
     displayed)        displayed_ver "${2:-}" ;;
     assert-displayed) assert_displayed "${2:-}" "${3:-}" ;;
-    *) echo "用法: $0 decide|installed|bundled|displayed|assert-displayed <AGENT_ROOT> [APP_DIR|期望版本]" >&2; exit 2 ;;
+    rewrite-ver)      rewrite_ver "${2:-}" ;;
+    assert-rewrite)   assert_rewrite "${2:-}" "${3:-}" ;;
+    *) echo "用法: $0 decide|installed|bundled|displayed|assert-displayed|rewrite-ver|assert-rewrite <AGENT_ROOT> [APP_DIR|期望版本]" >&2; exit 2 ;;
 esac

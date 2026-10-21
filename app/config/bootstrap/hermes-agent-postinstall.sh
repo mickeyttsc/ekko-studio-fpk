@@ -182,6 +182,36 @@ fi
 HARD=0
 [ -n "${EXPECT_NORM}" ] && HARD=1
 
+# ---- 3a. 版本锚点 tag 自愈：让「内核自己重写 stamp」也算得出版本 --------------
+# 这一步不是优化，是上面 stamp 能活过装机的唯一前提：
+#   · Studio 版本栏读 install-stamp.json 的 baseVersion；
+#   · 装机后内核还会自己重写这张 stamp（source_completion / post_update →
+#     write_source_stamp），它用 `git tag --merged HEAD --list 'v[0-9]*'` 推
+#     base_version；
+#   · 打包树是 tarball + git init 的单提交仓库，没有任何可达 tag → 重写成
+#     "unknown" → 界面回退 0.0.0（2026-10-21 实测：postinstall 写对 0.22.3，
+#     装完 3 分钟被后台 source_completion 洗成 unknown）。
+# install_callback 的离线源码路径已按锚点打 tag；这里再兜一次，覆盖「源码树
+# 自带旧 .git」「老版本安装路径」等没有走那段的情况。幂等：tag 已在 HEAD 上
+# 可达就不动。锚点非语义化（跟踪 main / 日期式 tag）时绝不打 —— 宁可让
+# 界面降级占位符，也不谎报一个与内核无关的版本号。
+ANCHOR_VER="${EXPECT_NORM}"
+if [ -z "${ANCHOR_VER}" ] && [ -f "${APP_DIR}/config/bootstrap/hermes-agent-version.env" ]; then
+    ANCHOR_VER="$(grep -E '^HERMES_AGENT_VERSION=' "${APP_DIR}/config/bootstrap/hermes-agent-version.env" 2>/dev/null \
+        | head -1 | cut -d= -f2 | tr -d '[:space:]')"
+    ANCHOR_VER="${ANCHOR_VER#v}"
+fi
+if printf '%s' "${ANCHOR_VER}" | grep -qE '^[0-9]{1,3}[.][0-9]{1,3}[.][0-9]{1,3}$' \
+   && [ -d "${AGENT_ROOT}/.git" ] && command -v git >/dev/null 2>&1; then
+    if git -C "${AGENT_ROOT}" tag --merged HEAD --list "v${ANCHOR_VER}" 2>/dev/null | grep -q .; then
+        echo "OK: 版本锚点 tag v${ANCHOR_VER} 已在 HEAD 上可达（内核重写 stamp 不会回退）"
+    elif git -C "${AGENT_ROOT}" tag -f "v${ANCHOR_VER}" HEAD >/dev/null 2>&1; then
+        echo "OK: 已补版本锚点 tag v${ANCHOR_VER} -> $(git -C "${AGENT_ROOT}" rev-parse --short HEAD 2>/dev/null)"
+    else
+        echo "WARNING: 补版本锚点 tag v${ANCHOR_VER} 失败（界面可能在装后回退 0.0.0）"
+    fi
+fi
+
 CURVER="$("$PY" -c 'import hermes_cli; print(hermes_cli.__version__)' 2>/dev/null)"
 NEED_WRITE=0
 if [ ! -s "$STAMP" ] || [ -z "$CURVER" ] || [ "$CURVER" = "0.0.0" ]; then
@@ -246,5 +276,20 @@ if [ "${HARD}" = "1" ]; then
         exit 1
     fi
     echo "OK: 界面显示版本 = ${EXPECT_NORM}（Studio 版本栏将显示此值）"
+
+    # ---- 4b. 自愈版本硬门禁：此刻对 ≠ 装完还对 ------------------------------
+    # 第 4 步只证明 install-stamp.json 现在是对的；它证明不了「装机后内核自己
+    # 重写这张 stamp 时不把它洗成 unknown」。2026-10-21 事故正是这样：postinstall
+    # 写对 0.22.3 并通过了第 4 步，3 分钟后后台 source_completion 用打包树的
+    # git（无可达 tag）重写 → baseVersion=unknown → 界面 0.0.0。
+    # 这里直接问内核「你自己重写会算出什么」，把回退在装机阶段就拦死。
+    # 判定真源 = ensure-kernel.sh assert-rewrite（与 version_info 同口径）。
+    RW_OUT="$(bash "${ENSURE}" assert-rewrite "${AGENT_ROOT}" "${EXPECT_NORM}" 2>&1 || true)"
+    printf '%s\n' "${RW_OUT}" | sed 's/^/    /'
+    if [ "$(printf '%s\n' "${RW_OUT}" | head -1)" = "MISMATCH" ]; then
+        echo "ERROR: 内核自愈版本断言失败（期望 ${EXPECT_NORM}）—— 装后 stamp 会被重写成 unknown、界面回退 0.0.0，拒绝放行"
+        exit 1
+    fi
+    echo "OK: 内核自愈版本 = ${EXPECT_NORM}（装后由内核重写 stamp 也保持此值）"
 fi
 exit 0
