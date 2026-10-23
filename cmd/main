@@ -573,9 +573,17 @@ ensure_agent_background_install() {
 
     # marker=failed：清理一次后重试（后台脚本自身失败时写 failed）
     if [ -f "${bg_marker}" ] && [ "$(cat "${bg_marker}" 2>/dev/null)" = "failed" ]; then
-        log_msg "WARNING: background agent install marked failed, cleaning & retrying"
-        rm -f "${bg_marker}" "${bg_pid_file}"
-        rm -rf "${HERMES_AGENT_ROOT}" 2>/dev/null || true
+        if [ -x "${HERMES_AGENT_ROOT}/venv/bin/hermes" ]; then
+            # 内核实际可用（人工修复过 / 回滚自愈）→ 只清 marker，绝不删内核。
+            # 2026-10-23 实测：无脑 rm -rf 把刚修好的内核又删了，升级崩到不见。
+            # marker 只反映「上次后台安装没成」，不反映「当前内核不可用」。
+            log_msg "WARNING: background agent install marked failed, but kernel is runnable — keeping kernel, clearing marker only"
+            rm -f "${bg_marker}" "${bg_pid_file}"
+        else
+            log_msg "WARNING: background agent install marked failed, cleaning & retrying"
+            rm -f "${bg_marker}" "${bg_pid_file}"
+            rm -rf "${HERMES_AGENT_ROOT}" 2>/dev/null || true
+        fi
     fi
 
     # 后台安装已在运行则不动

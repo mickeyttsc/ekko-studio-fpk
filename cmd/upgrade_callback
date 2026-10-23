@@ -102,19 +102,42 @@ run_install_callback() {
 # ---------------------------------------------------------------------------
 # 3. 检测已安装版本，决定是否需要重装
 # ---------------------------------------------------------------------------
+# ⚠️ HERMES_BIN 本文件此前从未定义 → [ -x "" ] 恒假 → 探测恒为 none → 每次升级
+#    都误走「完整安装」回退，与安装阶段已启动的后台内核对齐并发。2026-10-23
+#    实测：并发启动的第二个安装器走无备份 rm -rf 路径，把对齐失败刚回滚的内核
+#    又删掉，连环毁灭到「hermes 不见了」。这里按 install_callback / cmd/main
+#    的同一定义补上；探测失败时再退一层读落盘证据（package.json）。
+NODE_PREFIX="${DATA_DIR}/node"
+HERMES_BIN="${NODE_PREFIX}/bin/hermes-web-ui"
 INSTALLED_VER=""
 if [ -x "${HERMES_BIN}" ]; then
     INSTALLED_VER=$("${NODE_BIN}" "${HERMES_BIN}" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+fi
+if [ -z "${INSTALLED_VER}" ]; then
+    # node 执行 .mjs 在升级瞬间可能超时/失败（bin 软链刚重建、node 启动慢）——
+    # 探测拿空 ≠ 版本不匹配。退到落盘证据：已安装 web-ui 的 package.json。
+    _ui_pkg="${NODE_PREFIX}/lib/node_modules/hermes-web-ui/package.json"
+    if [ -f "${_ui_pkg}" ]; then
+        INSTALLED_VER="$(grep -m1 '"version"' "${_ui_pkg}" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+        log_msg "version probe failed; on-disk package.json says: ${INSTALLED_VER:-none}"
+    else
+        log_msg "version probe failed; no on-disk package.json at ${_ui_pkg}"
+    fi
 fi
 log_msg "installed: ${INSTALLED_VER:-none}, target: ${HERMES_STUDIO_VERSION}"
 
 if [ -n "${INSTALLED_VER}" ] && [ "${INSTALLED_VER}" = "${HERMES_STUDIO_VERSION}" ]; then
     log_msg "版本匹配，无需重装"
+elif [ -z "${INSTALLED_VER}" ]; then
+    # 探测与落盘证据都拿不到版本：没有阳性证据表明 web-ui 缺失/损坏。此时若
+    # 回退完整安装，会与安装阶段启动的后台内核对齐并发（见上方事故注释）——
+    # 保守跳过，把决定权交给 §3b 的内核闸门（它判不出时会 skip，不会乱动）。
+    log_msg "WARNING: 已装版本无法判定（探测与落盘证据均失败）—— 跳过重装，避免与后台内核对齐并发"
 else
-    # 版本缺失或不匹配时，直接复用 install_callback 完成完整安装（bundled
+    # 版本不匹配时，直接复用 install_callback 完成完整安装（bundled
     # node_modules、Agent 后台安装、权限修复等）。避免 upgrade_callback 再
     # 用 npm install -g 装到系统 Node global 目录。
-    log_msg "版本不匹配或缺失，回退到完整安装流程"
+    log_msg "版本不匹配，回退到完整安装流程"
     run_install_callback
 fi
 

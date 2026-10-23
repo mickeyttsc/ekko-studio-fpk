@@ -406,8 +406,17 @@ ensure_hermes_agent_background() {
     # 如果之前后台安装标记为失败，清理后重试
     local bg_marker="${HERMES_HOME}/.install-agent.marker"
     if [ -f "${bg_marker}" ] && [ "$(cat "${bg_marker}" 2>/dev/null)" = "failed" ]; then
-        log_msg "WARNING: previous background agent install failed, will retry"
-        rm -rf "${HERMES_AGENT_ROOT}" "${bg_marker}"
+        if [ -x "${HERMES_AGENT_ROOT}/venv/bin/hermes" ]; then
+            # 内核实际可用（人工修复过 / 回滚自愈）→ 只清 marker，绝不删内核。
+            # 2026-10-23 实测：无脑 rm -rf 把刚修好的内核删掉，升级直接崩到
+            # 「hermes 不见了」。marker 只反映「上次后台安装没成」，不反映
+            # 「当前内核不可用」——两者必须分开判。
+            log_msg "WARNING: previous background agent install failed, but kernel is runnable — keeping kernel, clearing marker only"
+            rm -f "${bg_marker}"
+        else
+            log_msg "WARNING: previous background agent install failed, will retry"
+            rm -rf "${HERMES_AGENT_ROOT}" "${bg_marker}"
+        fi
     fi
 
     log_msg ">>> Preparing Hermes Agent backend (will continue in background) ..."
@@ -507,11 +516,30 @@ fail() {
 rollback_or_fail() {
     if [ -n "\${AGENT_BACKUP}" ] && [ -d "\${AGENT_BACKUP}" ]; then
         echo "ERROR: \$1 → 回滚内核到 \${AGENT_BACKUP}" | tee -a "\${LOG_FILE}" >&2
+        # venv 是第 2c 步 mv 进新树的（复用备份venv，避免重下依赖）——不回搬的
+        # 话，下面 rm -rf 新树会把 venv 一并删掉，恢复出来的「旧内核」没有
+        # venv/bin/hermes。此后任何检查（install_callback 的已装判定、ensure-kernel
+        # 的 installed_ver、cmd/main 的 ready 检查）都误判「未安装」→ 走无备份
+        # rm -rf 路径 → 连环毁灭。2026-10-23 升级事故的全链最后一环就在这里。
+        # 只在备份缺 venv 且新树还有 venv 时回搬（2c 的 mv 失败场景备份仍有 venv）。
+        if [ ! -d "\${AGENT_BACKUP}/venv" ] && [ -d "\${AGENT_ROOT}/venv" ]; then
+            if mv "\${AGENT_ROOT}/venv" "\${AGENT_BACKUP}/venv" 2>/dev/null; then
+                echo "venv 已回搬备份（回滚后旧内核保持可运行）"
+            else
+                echo "WARNING: venv 回搬备份失败 —— 回滚后内核可能不可用" >&2
+            fi
+        fi
         rm -rf "\${AGENT_ROOT}" 2>/dev/null || true
         if mv "\${AGENT_BACKUP}" "\${AGENT_ROOT}"; then
-            echo "rolled-back" > "\${MARKER}"
+            if [ -x "\${AGENT_ROOT}/venv/bin/hermes" ]; then
+                echo "rolled-back" > "\${MARKER}"
+                rm -f "\${PID_FILE}"
+                echo "内核已回滚（\${INSTALLED_AGENT_VER}），venv 完好，应用可用旧内核启动"
+                exit 1
+            fi
+            echo "FATAL: 回滚后 venv/bin/hermes 仍缺失（备份在回搬前就缺 venv），需人工介入" | tee -a "\${LOG_FILE}" >&2
+            echo "failed" > "\${MARKER}"
             rm -f "\${PID_FILE}"
-            echo "内核已回滚（\${INSTALLED_AGENT_VER}），应用仍可用旧内核启动"
             exit 1
         fi
         echo "FATAL: 回滚失败，内核目录异常，需人工介入（备份在 \${AGENT_BACKUP}）" | tee -a "\${LOG_FILE}" >&2
@@ -559,7 +587,10 @@ rm -f "\${MARKER}"
     # 0) 后台安装前同样做一次残留进程/端口/属主清理（锚定本应用路径，不误杀
     #    Docker 容器 / 其他 Hermes 应用——见 preinstall_cleanup 注释）
     echo ">>> Background installer: cleaning residual processes & permissions ..."
-    local _bg_pats=(
+    # ⚠️ 这里是生成脚本的顶层（{ } 块内），不是函数 —— 用 local 会直接报
+    # "can only be used in a function" 且数组赋值失败，下面两个 pkill 循环
+    # 对着空数组空转，残留进程清理静默失效（2026-10-23 实测日志里的报错）。
+    _bg_pats=(
         "\${AGENT_ROOT}/venv/bin/hermes"
         "\${HERMES_HOME}/../data/node/lib/node_modules/hermes-web-ui"
     )
