@@ -340,6 +340,23 @@ ensure_hermes_agent_node_bundle() {
     echo "准备 agent node bundle（browser tools + TUI 依赖）..."
     rm -rf "$node_bundle"
     mkdir -p "$node_bundle"
+
+    # ── 引擎地板自检（2026-11-03 血债）──
+    # 上游源码树带 .npmrc: engine-strict=true，engines.node 不被满足时 npm 直接
+    # EBADENGINE 退出，两条 npm install 全挂；而这里的失败被 `|| true` 吞成 warning，
+    # 最后以「FPK 未包含 hermes-agent-node/node_modules」这条误导性报错在末尾中止，
+    # 排查时完全看不到真因（hermes-agent v0.22.6 把引擎抬到 >=26 就是这么连红 5 次的）。
+    # 所以：先把 engines.node 与本机 node 对一次，判定失败立刻给出准确原因并中止。
+    local want_eng node_have eng_verdict
+    want_eng="$(node -e 'const p=require(process.argv[1]);process.stdout.write((p.engines&&p.engines.node)||"")' \
+        "$src_dir/package.json" 2>/dev/null || true)"
+    node_have="$(node -p 'process.versions.node' 2>/dev/null || true)"
+    eng_verdict="$(python3 "$ROOT/scripts/detect-upstream.py" engine-ok "${want_eng:-}" "${node_have:-0}" 2>/dev/null || true)"
+    echo "上游源码 engines.node=${want_eng:-未声明} / 构建 node=${node_have} -> ${eng_verdict:-unknown}"
+    if [ "${eng_verdict}" = "no" ]; then
+        echo "::error::上游 hermes-agent 要求 node ${want_eng}，构建 node 只有 ${node_have}（npm 会 EBADENGINE）。请升级 config/bootstrap/node-runtime.env 与 build.yml 的 node 版本，或把 agent 锚点退回上一版" >&2
+        exit 1
+    fi
     # 关键：用尾斜杠把源码「内容」复制到 work 根目录，避免 cp 生成
     # work/<src_basename>/ 嵌套层。嵌套层会把构建机绝对路径（如
     # /home/runner/work/.../.agent-node-work）带进 hermes-agent-node/，
@@ -354,15 +371,25 @@ ensure_hermes_agent_node_bundle() {
     (
         cd "$work"
         echo "node: $(node --version)  npm: $(npm --version)"
+        # npm 输出落文件是为了不刷屏，但失败时必须把它打出来 —— 否则 CI 只剩一句
+        # 「agent node bundle 未生成」，真因（EBADENGINE / 网络 / 依赖解析）全丢。
+        rm -f /tmp/agent_node_build.log
+        dump_agent_npm_log() {
+            echo "::group::agent npm install 失败日志（末 80 行，全量见 /tmp/agent_node_build.log）"
+            tail -80 /tmp/agent_node_build.log 2>/dev/null || echo "(无日志)"
+            echo "::endgroup::"
+        }
         # 1) root 依赖（agent-browser / @streamdown/math = browser tools），只装 root 不装 workspace
         if ! npm install --no-audit --no-fund --omit=dev --no-workspaces --include-workspace-root \
                 >>/tmp/agent_node_build.log 2>&1; then
             echo "::warning:: agent root npm install 失败，agent node bundle 可能不完整（安装将回退在线 npm）"
+            dump_agent_npm_log
         fi
         # 2) TUI workspace（含 ui-tui/packages/hermes-ink 与 apps/shared 的 file: 依赖）
         if ! npm install --no-audit --no-fund --omit=dev --workspace ui-tui \
                 >>/tmp/agent_node_build.log 2>&1; then
             echo "::warning:: agent tui npm install 失败，TUI 可能不可用（安装将回退在线 npm）"
+            dump_agent_npm_log
         fi
     ) || true
 

@@ -5,7 +5,9 @@
     python3 scripts/detect-upstream.py webui   # 打印最新可打包的 hermes-web-ui 版本号
     python3 scripts/detect-upstream.py agent   # 打印 hermes-agent 最新 release 标签
     python3 scripts/detect-upstream.py sha256 <version>   # 打印该版本资产的 sha256
-    python3 scripts/detect-upstream.py selftest           # 无网络回归自检（标签过滤器行为契约）
+    python3 scripts/detect-upstream.py engine-ok <expr> <node_ver>   # engines.node 范围是否能被该 node 满足
+    python3 scripts/detect-upstream.py agent-node-ok <tag> <node_ver> # 拉该 tag 的 package.json 判引擎地板
+    python3 scripts/detect-upstream.py selftest           # 无网络回归自检（标签过滤器/引擎判定行为契约）
 
 设计依据（都是踩过的坑）：
   1. 上游 release 线被官方显式标记为非 latest，不能取 releases/latest，
@@ -147,6 +149,119 @@ def agent_tag_exists(tag):
         return False
 
 
+# ── 引擎地板判定（engines.node）─────────────────────────────────────────────
+# 为什么需要：hermes-agent v0.22.6 把 engines.node 从
+#   "^22.22.0 || ^24.11.0 || >=26.0.0" 抬成 ">=26"，而仓库自带 .npmrc 里
+#   engine-strict=true —— 我们捆绑的 node 24 直接 EBADENGINE，npm install 全挂，
+#   agent node bundle 生成不出来，构建在末尾 fail-closed 红掉（2026-11-03 实测）。
+#   跟随逻辑必须在 bump 之前就知道「这版我们跑得动吗」，而不是等 CI 红。
+#
+# 判定语义：engines.node 是 npm 的 semver range，满足【任一】|| 分句即可。
+# 只实现上游实际会用到的子集（比较符、^、~、通配、空格/逗号表示 AND）；
+# 解析不了就返回 None —— 调用方必须按 fail-closed 处理（不动锚点），
+# 因为「判不出来」和「判定通过」绝不能同待遇。
+_VER_TOK = re.compile(r"(>=|<=|>|<|\^|~|=)?\s*v?(\d+(?:\.[0-9xX*]+)*)")
+
+
+def _ver(s):
+    nums = [int(x) for x in re.findall(r"\d+", s)[:3]]
+    if not nums:
+        raise ValueError(s)
+    while len(nums) < 3:
+        nums.append(0)
+    return tuple(nums)
+
+
+def _cmp(ver, op, target):
+    if op in ("", "="):
+        return ver == target
+    if op == ">=":
+        return ver >= target
+    if op == ">":
+        return ver > target
+    if op == "<=":
+        return ver <= target
+    if op == "<":
+        return ver < target
+    major, minor, patch = target
+    if op == "^":
+        if ver < target:
+            return False
+        if major:
+            upper = (major + 1, 0, 0)
+        elif minor:
+            upper = (0, minor + 1, 0)
+        else:
+            upper = (0, 0, patch + 1)
+        return ver < upper
+    if op == "~":
+        if ver < target:
+            return False
+        return ver < (major, minor + 1, 0)
+    raise ValueError(op)
+
+
+def engine_satisfies(expr, node_version):
+    """engines.node 范围 expr 是否被 node_version 满足。True/False/None(无法解析)。"""
+    expr = (expr or "").strip()
+    if not expr:
+        return None
+    try:
+        have = _ver(node_version)
+    except ValueError:
+        return None
+    for disj in expr.split("||"):
+        disj = disj.strip()
+        if disj in ("*", "x", "X", ""):
+            return True
+        ok = True
+        matched = False
+        for m in _VER_TOK.finditer(disj):
+            matched = True
+            op = m.group(1) or ""
+            val = m.group(2)
+            low = val.lower()
+            if "x" in low or "*" in low:
+                # 通配（24.x / 24.*）：只比点分段前缀
+                pref = [int(x) for x in re.findall(r"\d+", val)]
+                if tuple(have[:len(pref)]) != tuple(pref):
+                    ok = False
+                    break
+                continue
+            if not _cmp(have, op, _ver(val)):
+                ok = False
+                break
+        # 还有没被解析掉的残渣（逗号/空格之外的字符）→ 口径不明，判不出来
+        if _VER_TOK.sub("", disj).strip(" ,\t"):
+            return None
+        if not matched:
+            return None
+        if ok:
+            return True
+    return False
+
+
+def agent_node_ok(tag, node_version):
+    """拉该 agent tag 的 package.json，判其 engines.node 是否被 node_version 满足。
+
+    输出 yes / no / unknown（unknown 由调用方按 fail-closed 处理）。
+    """
+    url = "https://raw.githubusercontent.com/%s/%s/package.json" % (AGENT_REPO, tag)
+    try:
+        pkg = json.loads(_get(url))
+    except Exception as e:  # noqa: BLE001 —— 网络/JSON 一律视为判不出来
+        print("package.json 拉取失败: %s" % e, file=sys.stderr)
+        return "unknown"
+    expr = ((pkg.get("engines") or {}).get("node") or "").strip()
+    verdict = engine_satisfies(expr, node_version)
+    print("engines.node=%r 本包 node=%s -> %s" % (expr, node_version, verdict),
+          file=sys.stderr)
+    if verdict is None:
+        return "unknown"
+    return "yes" if verdict else "no"
+
+
+
 # ── 回归自检：标签选取契约（无网络，CI 前置与本机都跑）────────────────────
 # 历史教训两层：
 #  ① 口径与声明脱节 —— 过滤器曾写成「major 任意位数」，注释说「拒绝日期式」，
@@ -229,6 +344,27 @@ SELFTEST_PICKS = [
 ]
 
 
+# 引擎地板样本：钉住「上游抬 engines.node 后我们该不该跟」这条判定。
+# 真实案例：0.22.5 的 "^22.22.0 || ^24.11.0 || >=26.0.0" 在 node 24.22 下可打包，
+# 0.22.6 的 ">=26" 不可打包 —— 必须在 bump 之前判出来，而不是等 CI 里 npm
+# EBADENGINE 把整个构建红掉（2026-11-03 实测连红 5 次才发现）。
+SELFTEST_ENGINES = [
+    (">=26", "24.22", False, "0.22.6 实况：要求 node 26"),
+    ("^22.22.0 || ^24.11.0 || >=26.0.0", "24.22", True, "0.22.5 实况：24.x 分句命中"),
+    ("^22.22.0 || >=26.0.0", "24.22", False, "去掉 24 分句即不兼容"),
+    (">=24", "24.22", True, "纯下限"),
+    ("24.x", "24.22", True, "通配主版本"),
+    ("24.x", "26.0", False, "通配不跨主版本"),
+    ("~24.11.0", "24.22", False, "~ 只到本 minor"),
+    (">=26 <27", "24.22", False, "空格 = AND"),
+    ("<=24.22.0", "24.22", True, "<= 命中"),
+    ("*", "24.22", True, "任意版本"),
+    ("", "24.22", None, "空值：判不出来"),
+    ("lts/iron", "24.22", None, "别名不是 semver：判不出来"),
+    (">=26", "v24.22.1", False, "带 v 前缀的 node 版本"),
+]
+
+
 def selftest():
     """无网络自检：标签选取契约 + 多口径一致性。全部通过返回 0。"""
     fails = []
@@ -245,6 +381,14 @@ def selftest():
         got = pick_agent_tag(releases)
         if got != want:
             fails.append("选取逻辑错误: %s —— 期望 %r 实得 %r" % (why, want, got))
+
+    # 2b) 引擎地板判定（engines.node × 本包 node）—— None 与 False 必须分得开：
+    #     前者由调用方 fail-closed 保留锚点，后者明确「跑不动」，两者都不能写成 True。
+    for expr, nodever, want, why in SELFTEST_ENGINES:
+        got = engine_satisfies(expr, nodever)
+        if got != want:
+            fails.append("引擎地板判定错误: engines.node=%r @ node %s 期望 %s 实得 %s (%s)"
+                         % (expr, nodever, want, got, why))
 
     # 3) shell 口径（ANCHOR_ERE）必须与 Python 口径逐样本等价 —— 但 main 是
     #    【刻意不对称】项：标签选取必须拒它，锚点校验必须收它（人工显式兜底值）。
@@ -320,8 +464,8 @@ def selftest():
             print("FAIL: %s" % f, file=sys.stderr)
         print("SELFTEST FAILED (%d 项)" % len(fails), file=sys.stderr)
         return 1
-    print("SELFTEST OK (%d 标签用例 + %d 选取用例 + ERE 等价 + 口径唯一性)"
-          % (len(SELFTEST_AGENT_TAGS), len(SELFTEST_PICKS)))
+    print("SELFTEST OK (%d 标签用例 + %d 选取用例 + %d 引擎用例 + ERE 等价 + 口径唯一性)"
+          % (len(SELFTEST_AGENT_TAGS), len(SELFTEST_PICKS), len(SELFTEST_ENGINES)))
     return 0
 
 
@@ -355,6 +499,25 @@ def main():
         if len(sys.argv) < 3:
             return 2
         return 0 if agent_tag_exists(sys.argv[2]) else 1
+    elif cmd == "engine-ok":
+        # 离线判定（不联网、不拉包）：给定 engines.node 范围与本包 node 版本，
+        # 打印 yes/no/unknown。build-fpk.sh 用它把「上游源码要求更高 node」在
+        # 打包前就变成明确的 ::error::，而不是让 npm 静默 EBADENGINE。
+        if len(sys.argv) < 4:
+            print("用法: detect-upstream.py engine-ok <engines.node 范围> <node 版本>",
+                  file=sys.stderr)
+            return 2
+        res = engine_satisfies(sys.argv[2], sys.argv[3])
+        print({True: "yes", False: "no", None: "unknown"}[res])
+        return 0 if res else 1
+    elif cmd == "agent-node-ok":
+        if len(sys.argv) < 4:
+            print("用法: detect-upstream.py agent-node-ok <tag> <node 版本>", file=sys.stderr)
+            return 2
+        res = agent_node_ok(sys.argv[2], sys.argv[3])
+        print(res)
+        # 退出码只表达「不是 yes」：调用方若只看退出码也必须 fail-closed
+        return 0 if res == "yes" else 1
     elif cmd == "selftest":
         return selftest()
     elif cmd == "gate-regex":

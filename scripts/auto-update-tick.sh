@@ -74,6 +74,33 @@ CUR_BASE="${CUR_VER%-*}"
 CUR_BUILD="${CUR_VER##*-}"
 case "${CUR_BUILD}" in ''|*[!0-9]*) CUR_BUILD=0 ;; esac
 
+# ── agent 引擎地板闸门（在 bump 之前判「这版我们跑得动吗」）───────────────────
+# 背景（2026-11-03 实测，连红 5 次构建）：上游 hermes-agent v0.22.6 把
+#   engines.node 从 "^22.22.0 || ^24.11.0 || >=26.0.0" 抬成 ">=26"，
+#   而源码树自带 .npmrc 里 engine-strict=true —— 本包捆绑的 node 24 当场
+#   EBADENGINE，npm install 全挂、hermes-agent-node/node_modules 生成不出来，
+#   构建只能 fail-closed 红掉。旧 tick 只比版本号高低，完全看不出这层不兼容，
+#   于是每轮都「成功 bump」→ 每轮都构建失败，锚点停在跑不动的版本上。
+# 现改为：拉候选 tag 的 package.json，用 config/bootstrap/node-runtime.env 声明的
+#   本包 node 版本判它的 engines.node；不是 yes（no / unknown / 网络失败）一律
+#   【保留原锚点】并喊 ::warning::，让人知道「上游又抬地板了」而不是静默卡住。
+#   fail-closed 的理由和标签闸门一致：宁可不跟，也不出装不起来的包。
+if [ "${AGENT_LATEST}" != "${CUR_AGENT}" ]; then
+    NODE_ENGINE="$(grep '^NODE_RUNTIME_ENGINE=' config/bootstrap/node-runtime.env 2>/dev/null | cut -d= -f2)"
+    if [ -z "${NODE_ENGINE}" ]; then
+        log "ERROR 读不到 config/bootstrap/node-runtime.env 的 NODE_RUNTIME_ENGINE —— 本轮不改 agent 锚点"
+        echo "::error::缺 NODE_RUNTIME_ENGINE（config/bootstrap/node-runtime.env），引擎地板无法判定，已保持锚点 ${CUR_AGENT}"
+        AGENT_LATEST="${CUR_AGENT}"
+    else
+        ENG="$(python3 scripts/detect-upstream.py agent-node-ok "${AGENT_LATEST}" "${NODE_ENGINE}" 2>/dev/null)"
+        if [ "${ENG}" != "yes" ]; then
+            log "候选 agent ${AGENT_LATEST} 的 engines.node 不被本包 node ${NODE_ENGINE} 满足（判定=${ENG:-空}）—— 拒绝 bump，保留 ${CUR_AGENT}"
+            echo "::warning::hermes-agent ${AGENT_LATEST} 要求更高的 node（本包 ${NODE_ENGINE}，判定=${ENG:-unknown}），已保留锚点 ${CUR_AGENT}；要跟上请先升级 config/bootstrap/node-runtime.env 并重打 node"
+            AGENT_LATEST="${CUR_AGENT}"
+        fi
+    fi
+fi
+
 WEBUI_ASSET="hermes-web-ui-${WEBUI_LATEST}.tar.gz"
 PIN_ENV="config/upstream/${WEBUI_ASSET}.env"
 

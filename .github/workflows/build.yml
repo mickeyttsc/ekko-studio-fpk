@@ -244,13 +244,39 @@ jobs:
         run: mkdir -p dist
 
       # bundled node（含原生 node-pty）必须在与 fnOS 运行时相同 ABI 的环境下编译，
-      # 否则 fnOS 上的 nodejs_v24 加载不了。固定 Node v24，ubuntu-latest 自带
-      # gcc/g++/make/python3 可编译 node-pty。
-      - name: Setup Node.js v24 (for bundled node ABI match)
+      # 否则 fnOS 上的 nodejs_v24 加载不了。主版本不在这里写死：
+      # 唯一真源是 config/bootstrap/node-runtime.env，auto-update 的引擎地板闸门
+      # 读的也是它 —— 两处若各写一份，就会出现「闸门以为跑得动、CI 装的却是另一版」。
+      - name: Read bundled node runtime
+        id: nodert
+        run: |
+          set -euo pipefail
+          ENG="$(grep '^NODE_RUNTIME_ENGINE=' config/bootstrap/node-runtime.env | cut -d= -f2)"
+          [ -n "$ENG" ] || { echo "::error:: config/bootstrap/node-runtime.env 缺 NODE_RUNTIME_ENGINE"; exit 1; }
+          MAJOR="${ENG%%.*}"
+          echo "engine=$ENG" >> "$GITHUB_OUTPUT"
+          echo "major=$MAJOR" >> "$GITHUB_OUTPUT"
+          echo "bundled node 声明: $ENG（major $MAJOR）"
+
+      - name: Setup Node.js (for bundled node ABI match)
         uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: ${{ steps.nodert.outputs.major }}
           check-latest: true
+
+      # 实际装到的 node 必须 ≥ 声明的引擎地板：上游换了打包 node 版本而这里忘了改，
+      # 会让 node-pty 在错误的 ABI 下编译，或让 agent npm install EBADENGINE。
+      - name: Assert node runtime matches declaration
+        run: |
+          set -euo pipefail
+          WANT="${{ steps.nodert.outputs.engine }}"
+          HAVE="$(node -p 'process.versions.node')"
+          echo "declared=$WANT actual=$HAVE"
+          LOWEST="$(printf '%s\n%s\n' "$WANT" "$HAVE" | sort -V | head -1)"
+          if [ "$LOWEST" != "$WANT" ]; then
+            echo "::error:: 实际 node $HAVE 低于声明的 NODE_RUNTIME_ENGINE=$WANT（config/bootstrap/node-runtime.env 与运行时不符）"
+            exit 1
+          fi
 
       # ── 上游标签过滤器回归自检（fail-closed）──
       # detect-upstream.py 的注释声明「只跟语义化 tag、拒绝日期式与 canary」，

@@ -33,3 +33,5 @@ scripts/local_monitor.py
 Thumbs.db
 *.log
 .workbuddy/
+__pycache__/
+*.pyc
