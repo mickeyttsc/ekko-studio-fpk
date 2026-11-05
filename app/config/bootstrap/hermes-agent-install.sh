@@ -1541,8 +1541,24 @@ install_deps() {
         #                  This respects the curation in pyproject.toml.
         # uv's own progress UI handles TTY detection and downgrades
         # gracefully when stdout/stderr aren't terminals.
+        # ── 两步：先 --locked，失败退 --frozen（FPK 打包侧补丁）────────────
+        # 上游 uv.lock 的 [options] 用的是【相对】exclude-newer（exclude-newer-span=“P3D”），
+        # 时间窗一滑动 uv 就认为锁过期 → --locked 直接失败；随后 uv 会【重新解析】，
+        # 而重解析要覆盖 lock 里的 android 分割环境
+        # （resolution-markers 含 sys_platform == 'android'），sherpa-onnx-core==1.13.8
+        # 没有 py3.14 的 android wheel → 无解 → 整个 Tier 0 挂掉，最后退到 `uv pip install`
+        # 各档，而 `uv pip install` **不读 pyproject 的 [tool.uv] override-dependencies**，
+        # 于是 Pillow==13.0.0 与 browser-harness==0.1.13 的 pillow==12.3.0 硬冲突，
+        # 四档全灭、内核回滚 —— 实测 v0.22.7 就是这么装不上的。
+        # --frozen = 按 lock 原样安装、不重解析、只校验包哈希，既能过又不放弃哈希校验。
         if UV_PROJECT_ENVIRONMENT="$INSTALL_DIR/venv" $UV_CMD sync --extra all --locked; then
             log_success "Main package installed (hash-verified via uv.lock)"
+            log_success "All dependencies installed"
+            return 0
+        fi
+        log_warn "uv.lock --locked 失败（多半是相对 exclude-newer 让锁被判过期），改走 --frozen（仍按锁装、仍校验哈希）..."
+        if UV_PROJECT_ENVIRONMENT="$INSTALL_DIR/venv" $UV_CMD sync --extra all --frozen; then
+            log_success "Main package installed (hash-verified via uv.lock, --frozen)"
             log_success "All dependencies installed"
             return 0
         fi
