@@ -24,12 +24,22 @@ resolve_pkg_home() {
 
 resolve_node_root() {
     local cand
-    for cand in /var/apps/nodejs_v24/target \
+    for cand in /var/apps/nodejs_v26/target \
+                /vol1/@appcenter/nodejs_v26 \
+                /vol2/@appcenter/nodejs_v26 \
+                /vol3/@appcenter/nodejs_v26 \
+                /vol4/@appcenter/nodejs_v26 \
+                /var/apps/nodejs_v24/target \
+                /var/apps/nodejs_v22/target \
                 /var/apps/nodejs_v23/target \
                 /vol1/@appcenter/nodejs_v24 \
                 /vol2/@appcenter/nodejs_v24 \
                 /vol3/@appcenter/nodejs_v24 \
                 /vol4/@appcenter/nodejs_v24 \
+                /vol1/@appcenter/nodejs_v22 \
+                /vol2/@appcenter/nodejs_v22 \
+                /vol3/@appcenter/nodejs_v22 \
+                /vol4/@appcenter/nodejs_v22 \
                 /vol1/@appcenter/nodejs_v23 \
                 /vol2/@appcenter/nodejs_v23 \
                 /vol3/@appcenter/nodejs_v23 \
@@ -46,7 +56,7 @@ HERMES_BIN="${NODE_PREFIX}/lib/node_modules/hermes-web-ui/bin/hermes-web-ui.mjs"
 
 NODE_ROOT="$(resolve_node_root)"
 if [ -z "${NODE_ROOT}" ]; then
-    echo "ERROR: Node.js v24/v23 runtime not found. Please install Node.js from App Center." >&2
+    echo "ERROR: Node.js v26 runtime not found. Please install Node.js from App Center." >&2
     exit 1
 fi
 

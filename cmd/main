@@ -2,7 +2,7 @@
 #
 # Ekko Studio — 生命周期管理（fnOS 原生 npm 部署，非 Docker）
 #
-# 依赖：manifest install_dep_apps=nodejs_v24，由 fnOS 自动安装 Node.js 运行时。
+# 依赖：manifest install_dep_apps=nodejs_v26，由 fnOS 自动安装 Node.js 运行时。
 #
 
 TRIM_APPDEST="${TRIM_APPDEST:-}"
@@ -466,7 +466,12 @@ clean_residual_files() {
 
 resolve_node_root() {
     local cand
-    for cand in /var/apps/nodejs_v24/target \
+    for cand in /var/apps/nodejs_v26/target \
+                /vol1/@appcenter/nodejs_v26 \
+                /vol2/@appcenter/nodejs_v26 \
+                /vol3/@appcenter/nodejs_v26 \
+                /vol4/@appcenter/nodejs_v26 \
+                /var/apps/nodejs_v24/target \
                 /var/apps/nodejs_v22/target \
                 /var/apps/nodejs_v23/target \
                 /vol1/@appcenter/nodejs_v24 \
@@ -489,7 +494,7 @@ resolve_node_root() {
 NODE_ROOT="$(resolve_node_root)"
 NODE_BIN="${NODE_ROOT}/bin/node"
 if [ -z "${NODE_ROOT}" ]; then
-    log_msg "ERROR: Node.js v24/v23 runtime not found. Please install Node.js from App Center."
+    log_msg "ERROR: Node.js v26 runtime not found. Please install Node.js from App Center."
     exit 1
 fi
 

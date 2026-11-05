@@ -22,7 +22,12 @@ trap 'toast_err "脚本出错(L${LINENO}): $(tail -3 "${LOG_FILE}" 2>/dev/null)"
 # 使用 fnOS 应用中心 Node.js 运行时，而不是假设 hermes-web-ui 已装在 data/node
 resolve_node_root() {
     local cand
-    for cand in /var/apps/nodejs_v24/target \
+    for cand in /var/apps/nodejs_v26/target \
+                /vol1/@appcenter/nodejs_v26 \
+                /vol2/@appcenter/nodejs_v26 \
+                /vol3/@appcenter/nodejs_v26 \
+                /vol4/@appcenter/nodejs_v26 \
+                /var/apps/nodejs_v24/target \
                 /var/apps/nodejs_v22/target \
                 /var/apps/nodejs_v23/target \
                 /vol1/@appcenter/nodejs_v24 \
@@ -77,7 +82,7 @@ log_msg "hermes-web-ui target version: ${HERMES_STUDIO_VERSION}"
 # ---------------------------------------------------------------------------
 if [ ! -x "${NODE_BIN}" ]; then
     log_msg "ERROR: Node.js runtime not found"
-    toast_err "未找到 Node.js 运行时，请检查 install_dep_apps=nodejs_v24"
+    toast_err "未找到 Node.js 运行时，请检查 install_dep_apps=nodejs_v26"
     exit 1
 fi
 

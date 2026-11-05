@@ -244,7 +244,7 @@ jobs:
         run: mkdir -p dist
 
       # bundled node（含原生 node-pty）必须在与 fnOS 运行时相同 ABI 的环境下编译，
-      # 否则 fnOS 上的 nodejs_v24 加载不了。主版本不在这里写死：
+      # 否则 fnOS 上的 nodejs_v26 加载不了。主版本不在这里写死：
       # 唯一真源是 config/bootstrap/node-runtime.env，auto-update 的引擎地板闸门
       # 读的也是它 —— 两处若各写一份，就会出现「闸门以为跑得动、CI 装的却是另一版」。
       - name: Read bundled node runtime

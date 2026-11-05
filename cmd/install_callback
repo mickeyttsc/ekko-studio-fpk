@@ -7,7 +7,7 @@
 ###      无需联网，安装只需几秒，也不会被 fnOS 安装超时掐断。
 ###   2. 若 bundled node 不存在（开发/测试场景），回退到 npm install。
 ###
-### 运行时依赖：manifest 中 install_dep_apps=nodejs_v24，由 fnOS 自动安装 Node.js 运行时。
+### 运行时依赖：manifest 中 install_dep_apps=nodejs_v26，由 fnOS 自动安装 Node.js 运行时。
 
 # 注意：不 set -e。install_callback 里会执行大量 chmod/chown/pkill 等
 # 可能因环境差异（用户/卷/残留 root 文件）失败的命令；若 set -e，任一
@@ -74,11 +74,16 @@ fi
 log_msg "target hermes-web-ui version: ${HERMES_STUDIO_VERSION}"
 
 # ---------------------------------------------------------------------------
-# 2. 定位飞牛应用中心 Node.js v24（install_dep_apps=nodejs_v24 保证存在）
+# 2. 定位飞牛应用中心 Node.js v26（install_dep_apps=nodejs_v26 保证存在；v24/v22/v23 仅作末位兜底）
 # ---------------------------------------------------------------------------
 resolve_node_root() {
     local cand
-    for cand in /var/apps/nodejs_v24/target \
+    for cand in /var/apps/nodejs_v26/target \
+                /vol1/@appcenter/nodejs_v26 \
+                /vol2/@appcenter/nodejs_v26 \
+                /vol3/@appcenter/nodejs_v26 \
+                /vol4/@appcenter/nodejs_v26 \
+                /var/apps/nodejs_v24/target \
                 /var/apps/nodejs_v22/target \
                 /var/apps/nodejs_v23/target \
                 /vol1/@appcenter/nodejs_v24 \
@@ -158,7 +163,7 @@ EOF
 
 NODE_ROOT="$(resolve_node_root)"
 if [ -z "${NODE_ROOT}" ]; then
-    toast_err "未找到应用中心 Node.js v24/v23，请先安装 Node.js 应用或检查 install_dep_apps 声明"
+    toast_err "未找到应用中心 Node.js v26，请先安装 Node.js 应用或检查 install_dep_apps 声明"
     exit 1
 fi
 
