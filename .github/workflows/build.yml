@@ -332,16 +332,31 @@ jobs:
           rm -rf app/hermes-agent-src /tmp/ha.tar.gz /tmp/ha-extract
           mkdir -p /tmp/ha-extract
           AUTH=(-H "Authorization: token ${GITHUB_TOKEN}")
-          for i in 1 2 3; do
-            echo "  尝试下载 ($i/3)..."
-            if curl -fsSL --max-time 600 "${AUTH[@]}" \
-                 "https://api.github.com/repos/NousResearch/hermes-agent/tarball/${DESIRED_REF}" \
-                 -o /tmp/ha.tar.gz; then
-              break
+          # 重试要够长、要认 Retry-After：GitHub 对 api/codeload 的 429 多是【次级限流】，
+          # 官方建议按 Retry-After 等待（往往数十秒到数分钟），5 秒连打三次只会拿回三个 429
+          # —— 2026-11-06 实测：v0.23.0 锚点刚 bump，构建因源码包 429 中止，自动跟随断在半路，
+          # 只能人工重触发。故：递增退避 + 读 Retry-After，最后两次改走 codeload
+          # （不同限流桶，api 桶被占满时通常仍可用）。
+          _ok=0
+          for i in 1 2 3 4 5; do
+            case "$i" in
+              1|2|3) URL="https://api.github.com/repos/NousResearch/hermes-agent/tarball/${DESIRED_REF}" ;;
+              *)     URL="https://codeload.github.com/NousResearch/hermes-agent/tar.gz/${DESIRED_REF}" ;;
+            esac
+            echo "  尝试下载 ($i/5): $URL"
+            if curl -fsSL --max-time 600 "${AUTH[@]}" -D /tmp/ha.hdr \
+                 "$URL" -o /tmp/ha.tar.gz; then
+              _ok=1; break
             fi
-            echo "  下载失败，重试..."
-            sleep 5
+            RA="$(awk 'tolower($1)=="retry-after:"{gsub(/[^0-9]/,"",$2);print $2}' /tmp/ha.hdr 2>/dev/null | tail -1)"
+            case "$RA" in ''|*[!0-9]*) RA=0 ;; esac
+            [ "$RA" -gt 300 ] && RA=300
+            SLEEP=$(( i * 15 ))
+            [ "$RA" -gt "$SLEEP" ] && SLEEP="$RA"
+            echo "  下载失败（Retry-After=${RA:-无}），${SLEEP}s 后重试..."
+            sleep "$SLEEP"
           done
+          [ "$_ok" = "1" ] || rm -f /tmp/ha.tar.gz
           # 标签下载失败 => 中止构建。⛔ 不要再回退 main：静默回退会装出
           # 「锚点写 vA.B.C、内核实为 main 前沿」的不可复现包，版本显示与
           # hermes update 的通道判定全部失真（2026-10-14 简报根因之一）。
