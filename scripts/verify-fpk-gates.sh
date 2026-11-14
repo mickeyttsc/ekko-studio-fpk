@@ -624,6 +624,20 @@ else
     echo "✅ 检测到 Agent TUI 依赖"
 fi
 
+# TUI 的 workspace 依赖必须是真实目录（不能是软链，也不能缺）：
+# ui-tui/src/gatewayClient.ts 运行时 import '@hermes/shared/gateway-client'。
+# 2026-11-14 实测：只镜像 node_modules 树会把 node_modules/@hermes/shared 留成
+# 悬空软链，打包后处理直接删掉 → 装好即缺依赖，但构建当时是绿的。
+if ! grep -qE '^hermes-agent-node/ui-tui/node_modules/@hermes/shared/package\.json$' "$TMP/inner.list"; then
+    echo "::error:: 包内缺 ui-tui/node_modules/@hermes/shared（或仍是软链）—— TUI 运行时 import '@hermes/shared' 会失败，构建中止"
+    exit 1
+fi
+if ! grep -qE '^hermes-agent-node/ui-tui/node_modules/@hermes/ink/package\.json$' "$TMP/inner.list"; then
+    echo "::error:: 包内缺 ui-tui/node_modules/@hermes/ink（或仍是软链）—— TUI 无法渲染，构建中止"
+    exit 1
+fi
+echo "✅ Agent TUI 的 workspace 依赖已解引用成真实目录（@hermes/shared / @hermes/ink）"
+
 if grep -qE 'hermes-agent-node/(home/|.*/\.agent-node-work/)' "$TMP/inner.list"; then
     echo "::error:: hermes-agent-node 内混入构建机绝对路径，打包脚本路径处理 bug 复发，构建中止"
     exit 1

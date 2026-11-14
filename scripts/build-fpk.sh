@@ -357,6 +357,61 @@ ensure_hermes_agent_node_bundle() {
         echo "::error::上游 hermes-agent 要求 node ${want_eng}，构建 node 只有 ${node_have}（npm 会 EBADENGINE）。请升级 config/bootstrap/node-runtime.env 与 build.yml 的 node 版本，或把 agent 锚点退回上一版" >&2
         exit 1
     fi
+    # ── 包管理器判定（2026-11-14 血债：上游 v0.23.1 把依赖安装从 npm 切到 pnpm）──
+    # 上游 v0.23.1 的 package.json 把 engines.npm 写成一句非 semver 的句子
+    #   "npm is refused here: run pnpm install --frozen-lockfile at the repository root"
+    # 配合 .npmrc 里遗留的 engine-strict=true，任何 `npm install` 都直接 EBADENGINE 退出。
+    # 判据不看版本号、只看上游源码自己声明的包管理器（pm/lock.json 的 pnpm pin +
+    # engines.npm 是否被拒），因此上游再换回来/再换别的 pin 都不用改这里。
+    # 老锚点（≤ v0.23.0，没有 pm/lock.json 且 engines.npm 是正常区间）仍走 npm 分支，
+    # 保证「回滚锚点重打」这条救急路径不会因为本次改造而失效。
+    local pm_mode="npm" pnpm_pin="" npm_expr=""
+    if [ -f "$src_dir/pm/lock.json" ]; then
+        pnpm_pin="$(python3 -c 'import json,sys
+try:
+    d=json.load(open(sys.argv[1]))
+    v=((d.get("packages") or {}).get("pnpm") or {}).get("version")
+    print(v if isinstance(v,str) else "")
+except Exception:
+    print("")' "$src_dir/pm/lock.json" 2>/dev/null || true)"
+        npm_expr="$(node -e 'const p=require(process.argv[1]);process.stdout.write((p.engines&&p.engines.npm)||"")' \
+            "$src_dir/package.json" 2>/dev/null || true)"
+        # engines.npm 解析不出 semver 区间 ⇒ 上游显式拒绝 npm
+        if [ -n "$npm_expr" ] && \
+           [ "$(python3 "$ROOT/scripts/detect-upstream.py" engine-ok "$npm_expr" "0.0.0" 2>/dev/null || true)" = "unknown" ]; then
+            pm_mode="pnpm"
+        fi
+    fi
+    echo "上游包管理器判定: ${pm_mode}${pnpm_pin:+ (pin ${pnpm_pin})} · engines.npm='${npm_expr:-未声明}'"
+
+    # pnpm 版本必须与上游 pin 完全一致：根 preinstall 会校验 npm_config_user_agent
+    # 是否等于 pnpm/<pin>，不一致直接 exit 1（不是警告）。所以这里按 pin 现装，
+    # 不写死版本号，也不用 corepack（corepack 在 CI 上还会自己去下载）。
+    local pnpm_bin=""
+    if [ "$pm_mode" = "pnpm" ]; then
+        if [ -z "$pnpm_pin" ]; then
+            echo "::error::上游有 pm/lock.json 但读不出 pnpm pin（packages.pnpm.version），无法确定安装器版本" >&2
+            exit 1
+        fi
+        pnpm_bin="$(command -v pnpm 2>/dev/null || true)"
+        if [ -z "$pnpm_bin" ] || \
+           [ "$("$pnpm_bin" --version 2>/dev/null | tr -d '[:space:]')" != "$pnpm_pin" ]; then
+            echo "安装上游 pin 的 pnpm ${pnpm_pin} ..."
+            rm -rf "$ROOT/.pnpm-home"
+            if ! npm install -g --no-audit --no-fund --prefix "$ROOT/.pnpm-home" "pnpm@${pnpm_pin}" \
+                    >/tmp/pnpm_bootstrap.log 2>&1; then
+                echo "::group::pnpm 安装失败（末 40 行）"
+                tail -40 /tmp/pnpm_bootstrap.log 2>/dev/null || echo "(无日志)"
+                echo "::endgroup::"
+                echo "::error::无法安装上游 pin 的 pnpm ${pnpm_pin}（agent node bundle 无法生成）" >&2
+                exit 1
+            fi
+            pnpm_bin="$ROOT/.pnpm-home/bin/pnpm"
+        fi
+        [ -x "$pnpm_bin" ] || { echo "::error::pnpm 未就绪: $pnpm_bin" >&2; exit 1; }
+        echo "pnpm: $("$pnpm_bin" --version)"
+    fi
+
     # 关键：用尾斜杠把源码「内容」复制到 work 根目录，避免 cp 生成
     # work/<src_basename>/ 嵌套层。嵌套层会把构建机绝对路径（如
     # /home/runner/work/.../.agent-node-work）带进 hermes-agent-node/，
@@ -368,30 +423,61 @@ ensure_hermes_agent_node_bundle() {
     # 用 tar 管道复制并排除 .git，既绕开 cp 的 stat 竞态，也不把 .git 带进 hermes-agent-node。
     tar -C "$src_dir" --exclude='.git' -cf - . | tar -xf - -C "$work"
 
+    local install_rc=0
     (
         cd "$work"
-        echo "node: $(node --version)  npm: $(npm --version)"
-        # npm 输出落文件是为了不刷屏，但失败时必须把它打出来 —— 否则 CI 只剩一句
-        # 「agent node bundle 未生成」，真因（EBADENGINE / 网络 / 依赖解析）全丢。
         rm -f /tmp/agent_node_build.log
+        # 安装输出落文件是为了不刷屏，但失败时必须把它打出来 —— 否则 CI 只剩一句
+        # 「agent node bundle 未生成」，真因（EBADENGINE / 网络 / 依赖解析）全丢。
         dump_agent_npm_log() {
-            echo "::group::agent npm install 失败日志（末 80 行，全量见 /tmp/agent_node_build.log）"
+            echo "::group::agent node 依赖安装失败日志（末 80 行，全量见 /tmp/agent_node_build.log）"
             tail -80 /tmp/agent_node_build.log 2>/dev/null || echo "(无日志)"
             echo "::endgroup::"
         }
-        # 1) root 依赖（agent-browser / @streamdown/math = browser tools），只装 root 不装 workspace
-        if ! npm install --no-audit --no-fund --omit=dev --no-workspaces --include-workspace-root \
-                >>/tmp/agent_node_build.log 2>&1; then
-            echo "::warning:: agent root npm install 失败，agent node bundle 可能不完整（安装将回退在线 npm）"
-            dump_agent_npm_log
+        if [ "$pm_mode" = "pnpm" ]; then
+            local tui_name
+            tui_name="$(node -e 'try{process.stdout.write(require(process.argv[1]).name||"")}catch(e){}' \
+                "$work/ui-tui/package.json" 2>/dev/null || true)"
+            [ -n "$tui_name" ] || tui_name="hermes-tui"
+            echo "node: $(node --version)  pnpm: $("$pnpm_bin" --version)  (workspace: . + ${tui_name}...)"
+            # --config.node-linker=hoisted：pnpm 默认产出 .pnpm 虚拟仓 + 符号链接农场，
+            # 与本包的安装器模型（find -name node_modules + 整目录 cp -a 复制）相冲：
+            # 链接农场会让 find 把 .pnpm 里每个 slot 的 node_modules 再复制一遍，
+            # 体积翻倍且依赖层级不变才不断链。hoisted 产出扁平真实目录，与旧 npm 产物同构，
+            # 打包/安装/回滚三条路径都不需要新逻辑。
+            # --prod：只打运行时依赖（= 旧逻辑的 --omit=dev）。
+            # --frozen-lockfile：不动上游 pnpm-lock.yaml，结果可复现。
+            if ! "$pnpm_bin" install --frozen-lockfile --prod \
+                    --config.node-linker=hoisted \
+                    --filter . --filter "${tui_name}..." \
+                    >>/tmp/agent_node_build.log 2>&1; then
+                dump_agent_npm_log
+                # pnpm 模式下上游已拒绝 npm，没有可回退的安装路径 —— 这里必须硬失败，
+                # 早失败给出真因，而不是拖到末尾报一句误导性的「未包含 node_modules」。
+                echo "::error::agent pnpm install 失败（上游已拒 npm，无回退路径）" >&2
+                exit 1
+            fi
+        else
+            echo "node: $(node --version)  npm: $(npm --version)"
+            # 1) root 依赖（browser tools），只装 root 不装 workspace
+            if ! npm install --no-audit --no-fund --omit=dev --no-workspaces --include-workspace-root \
+                    >>/tmp/agent_node_build.log 2>&1; then
+                echo "::warning:: agent root npm install 失败，agent node bundle 可能不完整（安装将回退在线 npm）"
+                dump_agent_npm_log
+            fi
+            # 2) TUI workspace（含 ui-tui/packages/hermes-ink 与 apps/shared 的 file: 依赖）
+            if ! npm install --no-audit --no-fund --omit=dev --workspace ui-tui \
+                    >>/tmp/agent_node_build.log 2>&1; then
+                echo "::warning:: agent tui npm install 失败，TUI 可能不可用（安装将回退在线 npm）"
+                dump_agent_npm_log
+            fi
         fi
-        # 2) TUI workspace（含 ui-tui/packages/hermes-ink 与 apps/shared 的 file: 依赖）
-        if ! npm install --no-audit --no-fund --omit=dev --workspace ui-tui \
-                >>/tmp/agent_node_build.log 2>&1; then
-            echo "::warning:: agent tui npm install 失败，TUI 可能不可用（安装将回退在线 npm）"
-            dump_agent_npm_log
-        fi
-    ) || true
+    ) || install_rc=$?
+
+    if [ "$install_rc" -ne 0 ]; then
+        echo "::error::agent node bundle 安装失败（exit=$install_rc，见上方日志）；FPK 将在末尾门禁被拦，此处提前给出真因" >&2
+        exit 1
+    fi
 
     # 收集每个含 package.json 的目录（排除 node_modules 内）的 node_modules，
     # 按「相对 agent 源码根」的路径镜像进 hermes-agent-node/<rel>/node_modules。
@@ -413,6 +499,40 @@ ensure_hermes_agent_node_bundle() {
         cp -a "$pkgroot/node_modules" "$node_bundle/$rel/"
         count=$((count + 1))
     done < <(find "$work" -name package.json -not -path '*/node_modules/*' -exec dirname {} \;)
+
+    # ── 解引用 workspace 软链（2026-11-14 实锤：不打这一步，TUI 装完就跑不起来）──
+    # npm workspaces 与 pnpm（hoisted 也一样）都把 workspace 依赖做成符号链接：
+    #   node_modules/@hermes/shared        -> ../../apps/shared
+    #   ui-tui/node_modules/@hermes/shared -> ../../../apps/shared
+    #   ui-tui/node_modules/@hermes/ink    -> ../../packages/hermes-ink
+    # 而这里只镜像 node_modules 树、不带 apps/shared 之类源码目录，于是这些链接在
+    # 包内是悬空的；打包后处理（移除软链）会把它们直接删掉 → 装好后
+    # ui-tui/src/gatewayClient.ts 的 import '@hermes/shared/gateway-client' 解析失败，
+    # hermes --tui 起不来。故：目标在源码树内、且属运行时要用的 workspace 包 → 解引用成
+    # 真实副本；dev-only workspace（desktop / web / tests-js / bootstrap-installer）
+    # 体积大且运行时不加载 → 直接丢弃，不膨胀包体。
+    local link_deref=0 link_drop=0
+    while IFS= read -r lnk; do
+        local rel_lnk src_lnk tgt real
+        rel_lnk="${lnk#$node_bundle/}"
+        src_lnk="$work/$rel_lnk"
+        tgt="$(readlink "$src_lnk" 2>/dev/null || true)"
+        [ -n "$tgt" ] || { rm -f "$lnk"; continue; }
+        case "$tgt" in
+            /*) real="$(realpath -m "$tgt")" ;;
+            *)  real="$(realpath -m "$(dirname "$src_lnk")/$tgt")" ;;
+        esac
+        case "$real" in
+            "$work/apps/shared"|"$work/apps/shared/"*|"$work/ui-tui/packages/"*)
+                rm -f "$lnk"
+                cp -a "$real" "$lnk"
+                link_deref=$((link_deref + 1)) ;;
+            *)
+                rm -f "$lnk"
+                link_drop=$((link_drop + 1)) ;;
+        esac
+    done < <(find "$node_bundle" -type l 2>/dev/null)
+    echo "workspace 软链处理: 解引用 ${link_deref} 个（运行时要用的），丢弃 ${link_drop} 个（dev-only/失效）"
 
     rm -rf "$work"
 

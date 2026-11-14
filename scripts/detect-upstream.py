@@ -244,6 +244,14 @@ def engine_satisfies(expr, node_version):
 def agent_node_ok(tag, node_version):
     """拉该 agent tag 的 package.json，判其 engines.node 是否被 node_version 满足。
 
+    同时判「本包的构建链能不能装出这版依赖」（2026-11-14 血债补充）：
+    上游 v0.23.1 起把依赖安装从 npm 切到 pnpm，package.json 的 engines.npm 写成一句
+    非 semver 的拒绝语（"npm is refused here: ..."），配上 .npmrc 的 engine-strict=true，
+    旧的 `npm install` 路径直接 EBADENGINE —— 而引擎地板闸门只看 engines.node，
+    于是「跟到了一个跑不动的版本」：锚点 bump 成功、构建连红、发布停摆。
+    现判据：若该 tag 带 pm/lock.json（pnpm pin 的唯一真源），要求 pin 的 pnpm
+    在 npm registry 可得；否则 build-fpk.sh 的 pnpm 分支装不起来。
+
     输出 yes / no / unknown（unknown 由调用方按 fail-closed 处理）。
     """
     url = "https://raw.githubusercontent.com/%s/%s/package.json" % (AGENT_REPO, tag)
@@ -258,7 +266,45 @@ def agent_node_ok(tag, node_version):
           file=sys.stderr)
     if verdict is None:
         return "unknown"
-    return "yes" if verdict else "no"
+    if not verdict:
+        return "no"
+
+    # 包管理器闸门：pm/lock.json 存在 ⇒ 上游用 pin 住的 pnpm 安装
+    lock_url = "https://raw.githubusercontent.com/%s/%s/pm/lock.json" % (AGENT_REPO, tag)
+    try:
+        pm = json.loads(_get(lock_url))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            # 无 pm/lock.json ⇒ 仍是 npm 时代（≤ v0.23.0），现有 npm 路径可装
+            print("无 pm/lock.json（上游仍用 npm）", file=sys.stderr)
+            return "yes"
+        print("pm/lock.json 拉取失败: %s" % e, file=sys.stderr)
+        return "unknown"
+    except Exception as e:  # noqa: BLE001
+        print("pm/lock.json 解析失败: %s" % e, file=sys.stderr)
+        return "unknown"
+    pin = ((pm.get("packages") or {}).get("pnpm") or {}).get("version")
+    if not isinstance(pin, str) or not pin.strip():
+        # 有 pm/lock.json 但没 pin pnpm（实测 v0.23.0 就是这样，仍用 npm 装）： 
+        # 只有在上游确实拒了 npm（engines.npm 不是 semver 区间）时才判不出来。
+        npm_expr = ((pkg.get("engines") or {}).get("npm") or "").strip()
+        if npm_expr and engine_satisfies(npm_expr, "0.0.0") is None:
+            print("pm/lock.json 未 pin pnpm，且 engines.npm=%r 拒绝 npm —— 判不出来"
+                  % npm_expr, file=sys.stderr)
+            return "unknown"
+        print("无 pnpm pin，engines.npm=%r 仍可用 npm 安装" % npm_expr, file=sys.stderr)
+        return "yes"
+    pin = pin.strip()
+    # registry 版本存在性：构建链要现装这个 pin 的 pnpm（根 preinstall 会校验 UA）
+    reg_url = "https://registry.npmjs.org/pnpm/%s" % pin
+    try:
+        _get(reg_url)
+    except Exception as e:  # noqa: BLE001
+        print("pin 的 pnpm %s 在 registry 取不到: %s" % (pin, e), file=sys.stderr)
+        return "no"
+    print("上游用 pnpm %s（registry 可得），构建链已支持" % pin, file=sys.stderr)
+    return "yes"
+
 
 
 
