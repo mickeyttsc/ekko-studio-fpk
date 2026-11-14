@@ -66,6 +66,27 @@ if ! printf '%s' "${WEBUI_SHA}" | grep -qE '^[0-9a-f]{64}$'; then
     exit 0
 fi
 
+# ── 1b. 复位上一轮失败的现场（必须早于读锚点）────────────────────────────────
+# 2026-11-14 实锤：上一轮 push 失败可能把 checkout 留在「rebase 冲突中 + 锚点文件已被
+# 本地改写」的状态。此时本轮读到的是【本地改过的锚点】→ 判 up-to-date；而补推分支要
+# 求 origin/main..HEAD 有提交，冲突态下计数为 0 → 既不自愈也不补推，长驻 job 剩余
+# 时长全部空转（当天把 0.8.23 拖了几小时，只有换 job 重新 checkout 才恢复）。
+# 修法：每轮开始先把可疑现场复位到 origin/main —— 锚点文件全都能重算，丢弃是安全的。
+# 只在「有残留 rebase」或「版本文件有未提交改动」时复位，不动正常待推的提交。
+if [ -d .git ]; then
+    if [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; then
+        log "检测到残留 rebase（上一轮 push 失败留下的）→ 中止"
+        git rebase --abort >/dev/null 2>&1 || true
+    fi
+    if git fetch -q origin main 2>/dev/null; then
+        DIRTY_VER="$(git status --porcelain -- "$WEBUI_ENV" "$AGENT_ENV" config/upstream manifest 2>/dev/null | head -3 | tr '\n' ' ')"
+        if [ -n "${DIRTY_VER}" ]; then
+            log "检测到未提交的版本文件改动（上一轮失败留下的）→ 复位到 origin/main: ${DIRTY_VER}"
+            git reset --hard -q origin/main >/dev/null 2>&1 || true
+        fi
+    fi
+fi
+
 # ── 2. 与当前记录比对 ────────────────────────────────────────────────────────
 CUR_WEBUI="$(grep '^HERMES_STUDIO_VERSION=' "$WEBUI_ENV" | cut -d= -f2)"
 CUR_AGENT="$(grep '^HERMES_AGENT_VERSION=' "$AGENT_ENV" | cut -d= -f2)"
@@ -182,49 +203,98 @@ fi
 log "发现更新: webui ${CUR_WEBUI} -> ${WEBUI_LATEST} / agent ${CUR_AGENT} -> ${AGENT_LATEST}"
 
 # ── 3. 写回版本锚点与 sha256 固定值 ──────────────────────────────────────────
-sed -i "s/^HERMES_STUDIO_VERSION=.*/HERMES_STUDIO_VERSION=${WEBUI_LATEST}/" "$WEBUI_ENV"
-sed -i "s/^HERMES_AGENT_VERSION=.*/HERMES_AGENT_VERSION=${AGENT_LATEST}/" "$AGENT_ENV"
+# 抽成函数：推送被拒后需要「复位到远端 → 重算版本号 → 重写 → 重提」，两处逻辑必须同源。
+# 判空/判 pin 是否过期都在函数内现算 —— 复位到 origin/main 后远端内容可能已变。
+apply_anchors() {
+    local new_ver="$1"
+    sed -i "s/^HERMES_STUDIO_VERSION=.*/HERMES_STUDIO_VERSION=${WEBUI_LATEST}/" "$WEBUI_ENV"
+    sed -i "s/^HERMES_AGENT_VERSION=.*/HERMES_AGENT_VERSION=${AGENT_LATEST}/" "$AGENT_ENV"
 
-if [ "${PIN_STALE}" = "1" ]; then
-    mkdir -p config/upstream
-    {
-        echo "# 上游 hermes-web-ui 预构建产物的固定校验值（入库，由 auto-update 自动更新）"
-        echo "#"
-        echo "# 为什么固定进版本控制：只做「现拉 sidecar 现比」挡不住上游事后替换同版本"
-        echo "# 资产（sidecar 会跟着一起变，等于没校验）。固定值入库才能发现变更。"
-        echo "# build-fpk.sh 优先读这里的 SHA256，没有才退回拉取上游 <asset>.sha256 sidecar。"
-        echo "HERMES_WEB_UI_VERSION=${WEBUI_LATEST}"
-        echo "HERMES_WEB_UI_SHA256=${WEBUI_SHA}"
-    } > "$PIN_ENV"
-    find config/upstream -maxdepth 1 -name 'hermes-web-ui-*.env' ! -name "$(basename "$PIN_ENV")" -delete 2>/dev/null || true
-fi
+    if [ ! -f "$PIN_ENV" ] || ! grep -qF "HERMES_WEB_UI_SHA256=${WEBUI_SHA}" "$PIN_ENV" 2>/dev/null; then
+        mkdir -p config/upstream
+        {
+            echo "# 上游 hermes-web-ui 预构建产物的固定校验值（入库，由 auto-update 自动更新）"
+            echo "#"
+            echo "# 为什么固定进版本控制：只做「现拉 sidecar 现比」挡不住上游事后替换同版本"
+            echo "# 资产（sidecar 会跟着一起变，等于没校验）。固定值入库才能发现变更。"
+            echo "# build-fpk.sh 优先读这里的 SHA256，没有才退回拉取上游 <asset>.sha256 sidecar。"
+            echo "HERMES_WEB_UI_VERSION=${WEBUI_LATEST}"
+            echo "HERMES_WEB_UI_SHA256=${WEBUI_SHA}"
+        } > "$PIN_ENV"
+        find config/upstream -maxdepth 1 -name 'hermes-web-ui-*.env' ! -name "$(basename "$PIN_ENV")" -delete 2>/dev/null || true
+    fi
 
-# 版本号规则：web-ui 主版本变化则重置 build 为 1，否则 build+1
-if [ "${WEBUI_LATEST}" != "${CUR_BASE}" ]; then
-    NEW_VER="${WEBUI_LATEST}-1"
-else
-    NEW_VER="${CUR_BASE}-$((CUR_BUILD + 1))"
-fi
-sed -i "s/^version[[:space:]]*=.*/version               = ${NEW_VER}/" manifest
+    # 版本号规则：web-ui 主版本变化则重置 build 为 1，否则 build+1
+    sed -i "s/^version[[:space:]]*=.*/version               = ${new_ver}/" manifest
+}
+
+# read_version_triplet：从当前工作树（复位后=远端最新）重读版本号三元组
+read_version_triplet() {
+    CUR_WEBUI="$(grep '^HERMES_STUDIO_VERSION=' "$WEBUI_ENV" | cut -d= -f2)"
+    CUR_AGENT="$(grep '^HERMES_AGENT_VERSION=' "$AGENT_ENV" | cut -d= -f2)"
+    CUR_VER="$(grep '^version' manifest | cut -d= -f2 | tr -d ' ')"
+    CUR_BASE="${CUR_VER%-*}"
+    CUR_BUILD="${CUR_VER##*-}"
+    case "${CUR_BUILD}" in ''|*[!0-9]*) CUR_BUILD=0 ;; esac
+}
+
+next_version() {
+    if [ "${WEBUI_LATEST}" != "${CUR_BASE}" ]; then
+        echo "${WEBUI_LATEST}-1"
+    else
+        echo "${CUR_BASE}-$((CUR_BUILD + 1))"
+    fi
+}
+
+NEW_VER="$(next_version)"
+apply_anchors "$NEW_VER"
 log "新 FPK 版本: ${NEW_VER}"
 
-# ── 4. 提交并推送 ────────────────────────────────────────────────────────────
+# ── 4. 提交并推送（失败可重试，绝不停在冲突态）──────────────────────────────
+# 2026-11-14 实测故障（把 0.8.23 拖了几小时）：这里原本是
+#   git commit → git pull --rebase --autostash → git push
+# 而 autostash 的 rebase 一旦与远端同一区域冲突（当天人工刚把 manifest 的 version
+# 行从 0.8.22-1 改成 0.8.22-2），rebase 就停在半途：push 必失败，且后续每轮读到的
+# 锚点已是本地改过的值 → 判「up-to-date」；补推分支要求 origin/main..HEAD 有提交，
+# 冲突态下计数为 0 → 既不自愈也不补推，整个长驻 job 剩余 5 小时全空转，
+# 只能等下一次 job 重新 checkout 才恢复（表现为「自动构建像停了」）。
+# 现改为：直接 push；被拒就 abort rebase + 复位到 origin/main + 重算版本号重来，
+# 最多 3 次。复位丢弃的内容（锚点/manifest 版本行）全部可由本函数重算，安全。
 git config user.name "github-actions[bot]"
 git config user.email "github-actions[bot]@users.noreply.github.com"
-git add "$WEBUI_ENV" "$AGENT_ENV" config/upstream manifest
-if ! git diff --cached --quiet; then
-    git commit -q -m "chore: auto-bump upstream -> web-ui ${WEBUI_LATEST} / agent ${AGENT_LATEST} (FPK ${NEW_VER})"
-    # 长驻期间可能有其它提交推进了 main，先 rebase 再推，避免被拒
-    git pull --rebase --autostash -q origin main 2>/dev/null || true
-    if git push -q origin main 2>/dev/null; then
-        log "已推送 bump 提交"
-    else
-        log "ERROR 推送失败（下一轮重试）"
-        exit 0
+
+PUSHED=0
+for attempt in 1 2 3; do
+    git add "$WEBUI_ENV" "$AGENT_ENV" config/upstream manifest
+    if git diff --cached --quiet; then
+        # 与远端已一致（可能被其它 run/人工处理过）：无需提交，直接结束本轮
+        log "无实际改动可提交（可能已被其它 run 处理）"
+        PUSHED=1
+        break
     fi
-else
-    log "无实际改动可提交（可能已被其它 run 处理）"
+    git commit -q -m "chore: auto-bump upstream -> web-ui ${WEBUI_LATEST} / agent ${AGENT_LATEST} (FPK ${NEW_VER})"
+    if git push -q origin main 2>/dev/null; then
+        PUSHED=1
+        break
+    fi
+    log "推送被拒（第 ${attempt} 次）→ 中止残留 rebase、复位到 origin/main 后重算重试"
+    git rebase --abort >/dev/null 2>&1 || true
+    if ! git fetch -q origin main 2>/dev/null; then
+        sleep 5
+        continue
+    fi
+    git reset --hard -q origin/main >/dev/null 2>&1 || { log "ERROR 复位到 origin/main 失败"; break; }
+    read_version_triplet
+    NEW_VER="$(next_version)"
+    apply_anchors "$NEW_VER"
+    log "重算后 FPK 版本: ${NEW_VER}"
+done
+
+if [ "${PUSHED}" != "1" ]; then
+    log "ERROR 推送三次均失败（下一轮重试；工作树已复位，不会卡在冲突态）"
+    exit 0
 fi
+log "已推送 bump 提交"
 
 # ── 5. 立刻触发构建 ──────────────────────────────────────────────────────────
 # ⚠️ 不能用「等 auto-update 结束再由 workflow_run 接力」—— 本 job 会长驻数小时，
