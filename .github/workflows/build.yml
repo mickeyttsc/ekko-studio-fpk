@@ -377,8 +377,15 @@ jobs:
             git init -q
             git config user.email "ci@local"
             git config user.name "CI Builder"
-            git add -A
-            git commit -q -m "offline bundle"
+            # gc.auto=0：数万文件的 add/commit 会触发后台 gc --auto，而它会在
+            # 随后的 fnpack 复制阶段删松散对象 → lstat no such file（2026-11-17 事故）。
+            # 这里禁掉自动 gc，下面手工同步 repack 成单 pack。
+            git -c gc.auto=0 add -A
+            git -c gc.auto=0 commit -q -m "offline bundle"
+            # repack -d：打成单个 pack 并删除已入包的松散对象 —— 之后文件集合稳定，
+            # 复制期间不会有对象凭空消失；包体也更小。
+            git -c gc.auto=0 repack -adq || echo "::warning:: repack 失败（松散对象可能与 gc 竞态）"
+            echo "objects: loose=$(find .git/objects -mindepth 2 -maxdepth 2 -type f -not -path '*/pack/*' | wc -l) packs=$(ls .git/objects/pack/*.pack 2>/dev/null | wc -l)"
           )
           # 预置内核更新通道（装机后 `hermes update` 才能用）
           bash scripts/harden-agent-bundle.sh app/hermes-agent-src || true

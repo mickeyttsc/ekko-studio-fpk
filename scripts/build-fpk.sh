@@ -733,6 +733,22 @@ finally:
 PY
 }
 
+# ── 打包前把 hermes-agent-src 的 .git 收敛成单 pack（2026-11-17 run#44046382170 事故）──
+# 事故模型：准备步骤在该目录 `git add -A && git commit`，git 会在后台跑 `gc --auto`；
+# 紧接着 fnpack「Copy pack to tmp dir」逐文件复制整个 app/ 时，某个松散对象正被
+# gc 删除 → `lstat .../objects/xx/xxxx: no such file or directory` → 打包中止。
+# 偶发（取决于 gc 时机），但会静默卡住整条自动跟随链路。
+# 该 .git 会进包且装机后 hermes update 依赖它（remote/refspec/tag），不能删；
+# 解法是把松散对象同步打成单 pack —— repack -ad 顺手删除已入包的松散对象，
+# 此后 .git 里的文件集合稳定，复制期间不会再有文件消失。
+if [ -d "$ROOT/app/hermes-agent-src/.git" ]; then
+    if git -C "$ROOT/app/hermes-agent-src" -c gc.auto=0 repack -adq 2>/dev/null; then
+        echo "hermes-agent-src/.git 已收敛为单 pack（消除打包期 gc 竞态）"
+    else
+        echo "::warning:: hermes-agent-src/.git repack 失败（松散对象仍可能与后台 gc 竞态）" >&2
+    fi
+fi
+
 # ── 探测 fnpack ──
 FNPACK=""
 for cand in "$ROOT/fnpack.exe" "$ROOT/fnpack" fnpack fnpack.exe; do

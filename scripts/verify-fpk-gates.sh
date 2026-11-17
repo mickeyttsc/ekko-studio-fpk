@@ -107,6 +107,16 @@ case "$FIRST" in
 esac
 echo "✅ 内层无 app/ 与 ./ 前缀（首条: $FIRST）"
 
+# .git 会随包（装机后 hermes update 依赖它），但只允许「单 pack + 无松散对象」形态：
+# 松散对象会在构建期成为 fnpack 复制与后台 gc 的竞态源（2026-11-17 打包中断事故），
+# 也会让包空大几十 MB。松散对象 = .git/objects/<2位hex>/<38位hex>。
+LOOSE="$(grep -cE '(^|/)\.git/objects/[0-9a-f]{2}/[0-9a-f]{38}$' "$TMP/inner.list" || true)"
+if [ "${LOOSE:-0}" != "0" ]; then
+    echo "::error:: 随包 .git 含 ${LOOSE} 个松散对象（应为单 pack）—— 构建期会与后台 gc 竞态导致打包中断，且包体异常"
+    exit 1
+fi
+echo "✅ 随包 .git 为单 pack 形态（无松散对象）"
+
 if ! grep -qE '^config/privilege$' "$TMP/inner.list"; then
     echo "::error:: 内层缺 config/privilege，fnOS 无法确定运行用户"
     exit 1
