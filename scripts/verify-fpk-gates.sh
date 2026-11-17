@@ -453,10 +453,16 @@ if ! diff -q "scripts/patch-frame-headers.js" "app/bin/patch-frame-headers.js" >
 fi
 echo "✅ 构建期/运行时补丁脚本同源（无副本漂移）"
 # ③ bundled 产物出厂即带补丁（fail-closed：内层 index.js 必须无 DENY/none）
+#    ⛔ 不要写死字面量：上游 header 代码会漂移 —— web-ui 0.8.25 起把
+#      set("X-Frame-Options","DENY") 改成三元条件
+#      set("X-Frame-Options",r?`SAMEORIGIN`:"DENY")，
+#      只认字面量会把「其实已打补丁」判成未打（2026-11-17 run#44042593675 卡在这）。
+#    判据 = 同一个 set 调用里 X-Frame-Options 的取值含 DENY/ALLOWALL 字面量。
+#    直接读 ②a 已解出来的 $TMP/$BUNDLED，不另拼 tar 路径（曾因路径不一致读到空 input）。
 #    grep -c 读完全部输入不早退，无 SIGPIPE 风险，可安全用于管道。
-XFO_DENY_LEFT="$(tar xzOf "$TMP/app.tgz" node/lib/node_modules/hermes-web-ui/dist/server/index.js 2>/dev/null | grep -c '"X-Frame-Options","DENY"' || true)"
-FA_NONE_LEFT="$(tar xzOf "$TMP/app.tgz" node/lib/node_modules/hermes-web-ui/dist/server/index.js 2>/dev/null | grep -c "frame-ancestors 'none'" || true)"
-ALLOWALL_N="$(tar xzOf "$TMP/app.tgz" node/lib/node_modules/hermes-web-ui/dist/server/index.js 2>/dev/null | grep -c '"X-Frame-Options","ALLOWALL"' || true)"
+XFO_DENY_LEFT="$(grep -cE '"X-Frame-Options",[^;{}]{0,120}"DENY"' "$TMP/$BUNDLED" 2>/dev/null || true)"
+FA_NONE_LEFT="$(grep -c "frame-ancestors 'none'" "$TMP/$BUNDLED" 2>/dev/null || true)"
+ALLOWALL_N="$(grep -cE '"X-Frame-Options",[^;{}]{0,120}"ALLOWALL"' "$TMP/$BUNDLED" 2>/dev/null || true)"
 if [ "${XFO_DENY_LEFT:-0}" != "0" ] || [ "${FA_NONE_LEFT:-0}" != "0" ] || [ "${ALLOWALL_N:-0}" = "0" ]; then
     echo "::error:: bundled index.js 未打 iframe 补丁（XFO DENY 残留=${XFO_DENY_LEFT}, frame-ancestors none 残留=${FA_NONE_LEFT}, ALLOWALL=${ALLOWALL_N}）—— 全新安装桌面小窗即空白，构建中止"
     exit 1

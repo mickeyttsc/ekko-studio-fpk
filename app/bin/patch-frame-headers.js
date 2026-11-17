@@ -121,7 +121,14 @@ const NEW_DIRECTIVE = STRICT ? ('frame-ancestors ' + LIST) : 'frame-ancestors *'
 let n = 0;
 
 // 1) X-Frame-Options: DENY -> ALLOWALL
-s = s.replace(/"X-Frame-Options","DENY"/g, () => { n++; return '"X-Frame-Options","ALLOWALL"'; });
+//    上游写法会漂移，两种形态都要认（web-ui 0.8.25 起改了）：
+//      a) 字面量   ...set("X-Frame-Options","DENY")
+//      b) 三元条件 ...set("X-Frame-Options",r?`SAMEORIGIN`:"DENY")   r = GET/HEAD 且 path=/plugin-frame.html
+//    b 形态只替换 DENY 分支，plugin-frame 的 SAMEORIGIN 保留。
+//    判据是「同一个 set 调用的第一个参数是 X-Frame-Options、值里有 DENY 字面量」，
+//    不看中间表达式长什么样；上限 120 字符避免跨越整行误伤。
+const XFO_ANY = /"X-Frame-Options",([^;{}]{0,120}?)"DENY"/g;
+s = s.replace(XFO_ANY, (m, mid) => { n++; return '"X-Frame-Options",' + mid + '"ALLOWALL"'; });
 
 // 2) 首次：frame-ancestors 'none' -> 白名单
 s = s.replace(/frame-ancestors 'none'/g, () => { n++; return NEW_DIRECTIVE; });
@@ -142,9 +149,9 @@ if (n === 0) {
 // 回读验证
 const after = fs.readFileSync(TARGET, 'utf8');
 const ok = (b) => (b ? 'yes' : 'NO(bad)');
-console.log('verify XFO DENY remaining: ' + ok(!after.includes('"X-Frame-Options","DENY"')));
+console.log('verify XFO DENY remaining: ' + ok(!/"X-Frame-Options",[^;{}]{0,120}?"DENY"/.test(after)));
 console.log('verify frame-ancestors none remaining: ' + ok(!/frame-ancestors 'none'/.test(after)));
-console.log('verify ALLOWALL present: ' + ok(after.includes('"X-Frame-Options","ALLOWALL"')));
+console.log('verify ALLOWALL present: ' + ok(/"X-Frame-Options",[^;{}]{0,120}?"ALLOWALL"/.test(after)));
 const m = after.match(/frame-ancestors 'self' [^";]*/);
 const wildcard = /frame-ancestors \*/.test(after);
 console.log('mode: ' + (wildcard ? 'permissive (frame-ancestors *)' : ('strict (whitelist, ' + (m ? m[0].split(/\s+/).length - 1 : 0) + ' entries)')));
